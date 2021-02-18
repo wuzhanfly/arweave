@@ -13,7 +13,9 @@
 	get_wallets/1,
 	get_wallet_list_chunk/2,
 	get_current_diff/0, get_diff/0,
-	get_pending_txs/0, get_pending_txs/1, get_ready_for_mining_txs/0, is_a_pending_tx/1,
+	get_pending_txs/0, get_pending_txs/1,
+	get_ready_for_mining_txs/0, get_ready_for_mining_txs/1,
+	is_a_pending_tx/1,
 	get_current_block_hash/0,
 	get_block_index_entry/1,
 	get_2_0_hash_of_1_0_block/1,
@@ -96,12 +98,21 @@ is_a_pending_tx(TXID) ->
 %% those on timeout waiting for network propagation.
 %% @end
 get_ready_for_mining_txs() ->
+	get_ready_for_mining_txs([]).
+
+get_ready_for_mining_txs(Opts) ->
 	[{tx_statuses, Map}] = ets:lookup(node_state, tx_statuses),
+	OnlyID = lists:member(id_only, Opts),
 	maps:fold(
 		fun
 			(TXID, ready_for_mining, Acc) ->
-				[{{tx, TXID}, TX}] = ets:lookup(node_state, {tx, TXID}),
-				[TX | Acc];
+				case OnlyID of
+					true ->
+						[TXID | Acc];
+					false ->
+						[{{tx, TXID}, TX}] = ets:lookup(node_state, {tx, TXID}),
+						[TX | Acc]
+				end;
 			(_, _, Acc) ->
 				Acc
 		end,
