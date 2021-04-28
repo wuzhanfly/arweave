@@ -1475,6 +1475,7 @@ post_block(read_blockshadow, OrigPeer, {Req, Pid}, ReceiveTimestamp) ->
 			end
 	end;
 post_block(check_indep_hash_processed, {BShadow, OrigPeer}, Req, ReceiveTimestamp) ->
+	?LOG_INFO("POST block recv ~p check_indep_hash_processed ~n", [BShadow#block.height]),
 	case ar_ignore_registry:member(BShadow#block.indep_hash) of
 		true ->
 			{208, <<"Block already processed.">>, Req};
@@ -1482,6 +1483,7 @@ post_block(check_indep_hash_processed, {BShadow, OrigPeer}, Req, ReceiveTimestam
 			post_block(check_indep_hash, {BShadow, OrigPeer}, Req, ReceiveTimestamp)
 	end;
 post_block(check_indep_hash, {BShadow, OrigPeer}, Req, ReceiveTimestamp) ->
+	?LOG_INFO("POST block recv ~p check_indep_hash ~n", [BShadow#block.height]),
 	BH = BShadow#block.indep_hash,
 	PrevH = BShadow#block.previous_block,
 	case ar_node:get_block_shadow_from_cache(PrevH) of
@@ -1513,6 +1515,7 @@ post_block(check_indep_hash, {BShadow, OrigPeer}, Req, ReceiveTimestamp) ->
 			end
 	end;
 post_block(check_timestamp, {BShadow, OrigPeer, BDS, PrevB}, Req, ReceiveTimestamp) ->
+	?LOG_INFO("POST block recv ~p check_timestamp ~n", [BShadow#block.height]),
 	%% Verify the timestamp of the block shadow.
 	case ar_block:verify_timestamp(BShadow) of
 		false ->
@@ -1534,6 +1537,7 @@ post_block(check_timestamp, {BShadow, OrigPeer, BDS, PrevB}, Req, ReceiveTimesta
 %% testnets. Therefore, we don't want to log when this check or any check above
 %% rejects the block because there are potentially a lot of rejections.
 post_block(check_difficulty, {BShadow, OrigPeer, BDS, PrevB}, Req, ReceiveTimestamp) ->
+	?LOG_INFO("POST block recv ~p check_difficulty ~n", [BShadow#block.height]),
 	case BShadow#block.diff >= ar_mine:min_difficulty(BShadow#block.height) of
 		true ->
 			post_block(check_pow, {BShadow, OrigPeer, BDS, PrevB}, Req, ReceiveTimestamp);
@@ -1545,6 +1549,7 @@ post_block(check_difficulty, {BShadow, OrigPeer, BDS, PrevB}, Req, ReceiveTimest
 %% be after the PoW check to reduce the possibility of doing a DOS attack on
 %% the network.
 post_block(check_pow, {BShadow, OrigPeer, BDS, PrevB}, Req, ReceiveTimestamp) ->
+	?LOG_INFO("POST block recv ~p check_pow ~n", [BShadow#block.height]),
 	Nonce = BShadow#block.nonce,
 	#block{ height = PrevHeight } = PrevB,
 	Height = PrevHeight + 1,
@@ -1569,6 +1574,7 @@ post_block(check_pow, {BShadow, OrigPeer, BDS, PrevB}, Req, ReceiveTimestamp) ->
 			{400, #{}, <<"Invalid Block Proof of Work">>, Req}
 	end;
 post_block(post_block, {BShadow, OrigPeer, BDS}, Req, ReceiveTimestamp) ->
+	?LOG_INFO("POST block recv ~p post_block ~n", [BShadow#block.height]),
 	record_block_pre_validation_time(ReceiveTimestamp),
 	?LOG_INFO([
 		{event, ar_http_iface_handler_accepted_block},
