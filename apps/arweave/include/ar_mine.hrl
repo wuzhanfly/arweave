@@ -12,6 +12,17 @@ end()).
 -define(SPORA_SEARCH_SPACE_SUBSPACES_COUNT, 1024).
 
 %% The minimum difficulty allowed.
+-ifdef(DEBUG).
+-define(SPORA_MIN_DIFFICULTY(Height), fun() ->
+	Forks = {
+		ar_fork:height_2_4()
+	},
+	case Forks of
+		{Fork_2_4} when Height >= Fork_2_4 ->
+			14
+	end
+end()).
+-else.
 -define(SPORA_MIN_DIFFICULTY(Height), fun() ->
 	Forks = {
 		ar_fork:height_2_4()
@@ -21,6 +32,7 @@ end()).
 			21
 	end
 end()).
+-endif.
 
 %% Recall bytes are only picked from the subspace up to the size
 %% of the weave at the block of the depth defined by this constant.
