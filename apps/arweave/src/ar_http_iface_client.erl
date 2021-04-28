@@ -104,6 +104,7 @@ send_new_block(Peer, #block{ height = Height } = NewB, BDS) ->
 		{<<"port">>, ?DEFAULT_HTTP_IFACE_PORT},
 		{<<"block_data_segment">>, ar_util:encode(BDS)}
 	],
+	?LOG_INFO("POST block send ~p~n", [NewB#block.height]),
 	ar_http:req(#{
 		method => post,
 		peer => Peer,

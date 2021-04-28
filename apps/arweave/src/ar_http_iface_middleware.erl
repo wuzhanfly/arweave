@@ -377,6 +377,7 @@ handle(<<"POST">>, [<<"chunk">>], Req, Pid) ->
 %% POST request to endpoint /block with the body of the request being a JSON encoded block
 %% as specified in ar_serialize.
 handle(<<"POST">>, [<<"block">>], Req, Pid) ->
+	?LOG_INFO("POST block recv raw~n",[]),
 	post_block(request, {Req, Pid}, erlang:timestamp());
 
 %% Generate a wallet and receive a secret key identifying it.
@@ -1456,6 +1457,7 @@ post_block(read_blockshadow, OrigPeer, {Req, Pid}, ReceiveTimestamp) ->
 						{error, {_, _}, ReadReq} ->
 							{400, #{}, <<"Invalid block.">>, ReadReq};
 						{ok, {_ReqStruct, BShadow}, ReadReq} ->
+							?LOG_INFO("POST block recv ~p~n", [BShadow#block.height]),
 							case byte_size(BShadow#block.indep_hash) > 48 of
 								true ->
 									{400, #{}, <<"Invalid block.">>, ReadReq};
