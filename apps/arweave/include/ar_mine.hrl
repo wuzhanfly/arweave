@@ -18,7 +18,7 @@ end()).
 	},
 	case Forks of
 		{Fork_2_4} when Height >= Fork_2_4 ->
-			21
+			?DEFAULT_SPORA_DIFF
 	end
 end()).
 
