@@ -62,13 +62,16 @@ end).
 		ar_fork:height_1_9(),
 		ar_fork:height_2_2()
 	},
+	%% In case the fork heights are reset to 0 (e.g. on testnets),
+	%% set the initial height to 1 - the height where the inflation
+	%% emission essentially begins.
 	case Forks of
 		{Fork_1_9, _Fork_2_2} when Height < Fork_1_9 ->
-			ar_fork:height_1_8();
+			max(ar_fork:height_1_8(), 1);
 		{_Fork_1_9, Fork_2_2} when Height >= Fork_2_2 ->
-			Fork_2_2;
+			max(Fork_2_2, 1);
 		{Fork_1_9, _Fork_2_2} ->
-			Fork_1_9
+			max(Fork_1_9, 1)
 	end
 end).
 
