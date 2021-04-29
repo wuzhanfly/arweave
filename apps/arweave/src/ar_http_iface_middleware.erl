@@ -1537,7 +1537,7 @@ post_block(check_timestamp, {BShadow, OrigPeer, BDS, PrevB}, Req, ReceiveTimesta
 %% testnets. Therefore, we don't want to log when this check or any check above
 %% rejects the block because there are potentially a lot of rejections.
 post_block(check_difficulty, {BShadow, OrigPeer, BDS, PrevB}, Req, ReceiveTimestamp) ->
-	?LOG_INFO("POST block recv ~p check_difficulty ~n", [BShadow#block.height]),
+	?LOG_INFO("POST block recv ~p check_difficulty ~p ~p ~p ~n", [BShadow#block.height, BShadow#block.diff, ar_mine:min_difficulty(BShadow#block.height), BShadow#block.diff >= ar_mine:min_difficulty(BShadow#block.height]),
 	case BShadow#block.diff >= ar_mine:min_difficulty(BShadow#block.height) of
 		true ->
 			post_block(check_pow, {BShadow, OrigPeer, BDS, PrevB}, Req, ReceiveTimestamp);
