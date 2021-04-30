@@ -1747,81 +1747,84 @@ process_request(get_block, [Type, ID, <<"reward">>], Req) ->
 		Filename ->
 			{ok, Binary} = file:read_file(Filename),
 			B = ar_serialize:json_struct_to_block(Binary),
-			Prev_reward_pool = case B#block.height of
+			case B#block.height of
 				0 ->
-					% I'm not sure that block height 0 has no reward_pool
-					0;
+					{200, #{}, "0", Req};
 				_ ->
-					PrevH = B#block.previous_block,
-					PrevH_filename = ar_storage:lookup_block_filename(PrevH),
-					{ok, Binary_prev} = file:read_file(PrevH_filename),
-					PrevB = ar_serialize:json_struct_to_block(Binary_prev),
-					PrevB#block.reward_pool
-			end,
-			TXs =
-				lists:map(
-					fun(Hash) ->
-						case hash_to_filename(tx, Hash) of
-							{error, invalid} ->
-								{error, 400, #{}, <<"TX Invalid hash.">>, Req};
-							{error, ID, unavailable} ->
-								case is_a_pending_tx(ID) of
-									true ->
-										{error, 202, #{}, <<"TX Pending">>, Req};
-									false ->
-										{error, 404, #{}, <<"TX Not Found.">>, Req}
-								end;
-							{Status, Filename} ->
-								Result =
-									case Status of
-										ok ->
-											ar_storage:read_tx_file(Filename);
-										migrated_v1 ->
-											ar_storage:read_migrated_v1_tx_file(Filename)
-									end,
-								case Result of
-									{ok, TX} ->
-										TX;
-									{error, enoent} ->
-										{error, 404, #{}, <<>>, Req};
-									{error, data_unavailable} ->
-										{error, 404, #{}, <<>>, Req};
-									_ ->
-										{error, 500, #{}, <<>>, Req}
+					TXs =
+						lists:map(
+							fun(Hash) ->
+								case hash_to_filename(tx, Hash) of
+									{error, invalid} ->
+										{error, 400, #{}, <<"TX Invalid hash.">>, Req};
+									{error, ID, unavailable} ->
+										case is_a_pending_tx(ID) of
+											true ->
+												{error, 202, #{}, <<"TX Pending">>, Req};
+											false ->
+												{error, 404, #{}, <<"TX Not Found.">>, Req}
+										end;
+									{Status, Filename} ->
+										Result =
+											case Status of
+												ok ->
+													ar_storage:read_tx_file(Filename);
+												migrated_v1 ->
+													ar_storage:read_migrated_v1_tx_file(Filename)
+											end,
+										case Result of
+											{ok, TX} ->
+												TX;
+											{error, enoent} ->
+												{error, 404, #{}, <<>>, Req};
+											{error, data_unavailable} ->
+												{error, 404, #{}, <<>>, Req};
+											_ ->
+												{error, 500, #{}, <<>>, Req}
+										end
 								end
-						end
-					end,
-					B#block.txs
-				),
-			{Tx_list, Error_list} =
-				lists:foldl(
-					fun(TX, {Tx_list, Error_list}) ->
-						case TX of
-							{error, A, B, C, D} ->
-								{Tx_list, [{A, B, C, D} | Error_list]};
-							TX_ok ->
-								{[Tx_list | TX_ok], Error_list}
-						end
-					end,
-					{[],[]},
-					TXs
-				),
-			case length(Error_list) > 0 of
-				true ->
-					element(1, Error_list);
-				false ->
-					{FinderReward, _RewardPool} =
-						ar_node_utils:get_miner_reward_and_endowment_pool({
-							Prev_reward_pool,
-							Tx_list,
-							B#block.reward_addr,
-							B#block.weave_size,
-							B#block.height,
-							B#block.diff,
-							B#block.timestamp
-						}),
-					{200, #{}, integer_to_binary(FinderReward), Req}
-				end
+							end,
+							B#block.txs
+						),
+					{Tx_list, Error_list} =
+						lists:foldl(
+							fun(TX, {Tx_list, Error_list}) ->
+								case TX of
+									{error, A, B, C, D} ->
+										{Tx_list, [{A, B, C, D} | Error_list]};
+									TX_ok ->
+										{[Tx_list | TX_ok], Error_list}
+								end
+							end,
+							{[],[]},
+							TXs
+						),
+					case length(Error_list) > 0 of
+						true ->
+							element(1, Error_list);
+						false ->
+							case B#block.height of
+								0 ->
+									{200, #{}, "0", Req};
+								_ ->
+									PrevH = B#block.previous_block,
+									PrevH_filename = ar_storage:lookup_block_filename(PrevH),
+									{ok, Binary_prev} = file:read_file(PrevH_filename),
+									PrevB = ar_serialize:json_struct_to_block(Binary_prev),
+									{FinderReward, _RewardPool} =
+										ar_node_utils:get_miner_reward_and_endowment_pool({
+											PrevB#block.reward_pool,
+											Tx_list,
+											B#block.reward_addr,
+											B#block.weave_size,
+											B#block.height,
+											B#block.diff,
+											B#block.timestamp
+										}),
+									{200, #{}, integer_to_binary(FinderReward), Req}
+							end
+					end
+			end
 	end;
 %% Return a requested field of a given block.
 %% GET request to endpoint /block/hash/{hash|height}/{field}.
