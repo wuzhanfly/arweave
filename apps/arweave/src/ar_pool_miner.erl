@@ -3,8 +3,8 @@
 
 
 -export([start_link/0]).
--export([init/1, handle_cast/2, handle_info/2, terminate/2]).
--export([start/1]).
+-export([init/1, handle_cast/2, handle_info/2, handle_call/3, terminate/2]).
+-export([start/1, get_results/0]).
 
 -include_lib("arweave/include/ar_config.hrl").
 
@@ -52,20 +52,16 @@ handle_cast({mine, MineArg}, State) ->
 		search_space_upper_bound  => MineArg#mine_arg.search_space_upper_bound,
 		bds_base                  => MineArg#mine_arg.bds_base,
 		nonce_filter              => MineArg#mine_arg.nonce_filter,
-		share_diff                => MineArg#mine_arg.share_diff
+		share_diff                => MineArg#mine_arg.share_diff,
+		solution_list             => []
 	}),
 	{noreply, NewState};
 
-handle_cast({work_complete, CurrentBH, B2, MinedTXs, BDS, SPoA}, State) ->
+handle_cast({work_complete, _CurrentBH, B2, _MinedTXs, _BDS, _SPoA}, State) ->
 	#{ solution_list := SolutionList } = State,
-	io:format("work_complete ~p ~n", [length(SolutionList)]),
 	{noreply, State#{
 		solution_list => [B2 | SolutionList]
-	}};
-
-handle_cast(_, State) ->
-	io:format("ar_pool_miner handle_cast~n"), % TODO remove after debug finished, before commit
-	{noreply, State}.
+	}}.
 
 terminate(_Reason, #{ miner := Miner }) ->
 	case Miner of
@@ -78,10 +74,16 @@ handle_info({work_complete, BaseBH, NewB, MinedTXs, BDS, POA}, State) ->
 	gen_server:cast(?MODULE, {work_complete, BaseBH, NewB, MinedTXs, BDS, POA}),
 	{noreply, State}.
 
+handle_call({get_results}, _From, State) ->
+	#{ solution_list := SolutionList } = State,
+	NewState = State#{
+		solution_list => []
+	},
+	{reply, #{solution_list => SolutionList}, NewState}.
+
 
 start_mining(StateIn) ->
-	io:format("start_mining 1 ~n"),
-	Ret = case ets:lookup(node_state, is_joined) of
+	case ets:lookup(node_state, is_joined) of
 		[{_, true}] ->
 			#{
 				io_threads := IOThreads,
@@ -103,8 +105,6 @@ start_mining(StateIn) ->
 			[{block_anchors, BlockAnchors}] = ets:lookup(node_state, block_anchors),
 			[{recent_txs_map, RecentTXMap}] = ets:lookup(node_state, recent_txs_map),
 			ar_watchdog:started_hashing(),
-			io:format("start ~n"),
-			io:format("IOThreads count ~p ~n", [length(IOThreads)]),
 			NewMiner = ar_mine:start_server_ext({
 				ar_pool_miner,
 				CurrentB,
@@ -125,12 +125,9 @@ start_mining(StateIn) ->
 			StateIn#{ miner => NewMiner };
 		_ ->
 			StateIn
-	end,
-	io:format("start_mining end~n"),
-	Ret.
+	end.
 
 start(MineJSON) ->
-	% io:format("MineJSON ~p ~n", [MineJSON]),
 	State = maps:get(<<"state">>, MineJSON, #{}),
 	Block = maps:get(<<"block">>, State, #{}),
 	MineArg = #mine_arg{
@@ -167,6 +164,27 @@ start(MineJSON) ->
 			txs             = maps:get(<<"txs">>, Block, [])
 		}
 	},
-	gen_server:cast(?MODULE, {mine, MineArg}),
-	% TODO return completed jobs
-	[].
+	gen_server:cast(?MODULE, {mine, MineArg}).
+
+get_results() ->
+	#{ solution_list := SolutionList } = gen_server:call(?MODULE, {get_results}),
+	lists:map(fun(NewCandidateB) ->
+		{[
+			{height, NewCandidateB#block.height},
+			{hash_list, ar_util:encode(NewCandidateB#block.hash_list)},
+			{previous_block, ar_util:encode(NewCandidateB#block.previous_block)},
+			{hash_list_merkle, ar_util:encode(NewCandidateB#block.hash_list_merkle)},
+			{timestamp, NewCandidateB#block.timestamp},
+			{last_retarget, NewCandidateB#block.last_retarget},
+			{diff, integer_to_binary(NewCandidateB#block.diff)},
+			{cumulative_diff, integer_to_binary(NewCandidateB#block.cumulative_diff)},
+			{block_size, integer_to_binary(NewCandidateB#block.block_size)},
+			{weave_size, integer_to_binary(NewCandidateB#block.weave_size)},
+			{reward_pool, integer_to_binary(NewCandidateB#block.reward_pool)},
+			{wallet_list, ar_util:encode(NewCandidateB#block.wallet_list)},
+			{tx_root, ar_util:encode(NewCandidateB#block.tx_root)},
+			{txs, lists:map(fun(TX) -> ar_util:encode(TX) end, NewCandidateB#block.txs)},
+			{reward_addr, ar_util:encode(NewCandidateB#block.reward_addr)},
+			{tags, []}
+		]}
+	end, SolutionList).

@@ -705,7 +705,6 @@ server(
 	receive
 		%% Stop the mining process and all the workers.
 		stop ->
-			io:format("server stop ~n"),
 			stop_miners(S),
 			log_spora_performance();
 		{solution, Nonce, H0, Timestamp, Hash} ->
@@ -715,7 +714,6 @@ server(
 					%% A stale solution.
 					server(S);
 				{#block{ timestamp = Timestamp } = B, BDS} ->
-					io:format("server solution good ~n"),
 					case get_spoa(H0, PrevH, SearchSpaceUpperBound) of
 						not_found ->
 							?LOG_WARNING([
@@ -781,17 +779,14 @@ server(
 		%% validated on the remote nodes when it's propagated to them. Only blocks
 		%% with a timestamp close to current time will be accepted in the propagation.
 		refresh_timestamp ->
-			io:format("server refresh_timestamp 1~n"),
 			UpdDS = case PoolMine of
 				true ->
 					update_data_segment_pool(S);
 				false ->
 					update_data_segment(S)
 			end,
-			io:format("server refresh_timestamp 2~n"),
 			server(notify_hashing_threads(UpdDS));
 		UnexpectedMessage ->
-			io:format("server UnexpectedMessage ~n"),
 			?LOG_WARNING(
 				"event: mining_server_got_unexpected_message, message: ~p",
 				[UnexpectedMessage]
