@@ -24,7 +24,6 @@
 %%%===================================================================
 
 start_link() ->
-	io:format("ar_pool_miner:start_link~n"), % TODO remove after debug finished, before commit
 	gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %%%===================================================================
@@ -32,7 +31,6 @@ start_link() ->
 %%%===================================================================
 
 init([]) ->
-	io:format("ar_pool_miner:init~n"), % TODO remove after debug finished, before commit
 	{ok, Config} = application:get_env(arweave, config),
 	IOThreads =
 		case Config#config.pool_mine of
@@ -41,29 +39,33 @@ init([]) ->
 			_ ->
 				[]
 		end,
-	io:format("ar_pool_miner:init 2~n"), % TODO remove after debug finished, before commit
 	{ok, #{
 		io_threads => IOThreads,
-		miner => undefined
+		miner => undefined,
+		solution_list => []
 	}}.
 
 handle_cast({mine, MineArg}, State) ->
-	io:format("mine MineArg ~p ~n", [MineArg]),
 	NewState = start_mining(State#{
 		current_block             => MineArg#mine_arg.prev_block,
 		candidate_block           => MineArg#mine_arg.candidate_block,
 		search_space_upper_bound  => MineArg#mine_arg.search_space_upper_bound,
-		bds_base                  => MineArg#mine_arg.bds_base
+		bds_base                  => MineArg#mine_arg.bds_base,
+		nonce_filter              => MineArg#mine_arg.nonce_filter,
+		share_diff                => MineArg#mine_arg.share_diff
 	}),
-	io:format("mine MineArg 2 ~n", []),
 	{noreply, NewState};
+
+handle_cast({work_complete, _CurrentBH, B2, _MinedTXs, _BDS, _SPoA}, State) ->
+	io:format("work_complete~n"),
+
+	#{ solution_list := SolutionList } = State,
+	{noreply, State#{
+		solution_list => [B2 | SolutionList]
+	}};
 
 handle_cast(_, State) ->
 	io:format("ar_pool_miner handle_cast~n"), % TODO remove after debug finished, before commit
-	{noreply, State}.
-
-handle_info(wallets_ready, State) ->
-	io:format("ar_pool_miner wallets_ready~n"),
 	{noreply, State}.
 
 terminate(_Reason, #{ miner := Miner }) ->
@@ -76,33 +78,32 @@ terminate(_Reason, #{ miner := Miner }) ->
 
 
 start_mining(StateIn) ->
-	io:format("start_mining 1~n"),
-	case ets:lookup(node_state, is_joined) of
+	io:format("start_mining 1 ~n"),
+	Ret = case ets:lookup(node_state, is_joined) of
 		[{_, true}] ->
-			io:format("start_mining 2~n"),
-			
 			#{
 				io_threads := IOThreads,
 				current_block := CurrentB,
 				candidate_block := CandidateB,
 				search_space_upper_bound := SearchSpaceUpperBound,
 				bds_base := BDSBase,
+				share_diff := ShareDiff,
+				nonce_filter := NonceFilter,
 				miner := Miner
 			} = StateIn,
-			io:format("start_mining 3~n"), % TODO remove after debug finished, before commit
 			case Miner of
 				undefined ->
 					do_nothing;
 				Pid ->
 					ar_mine:stop(Pid)
 			end,
-			io:format("start_mining 4~n"), % TODO remove after debug finished, before commit
 			[{block_index, BI}] = ets:lookup(node_state, block_index),
 			[{block_anchors, BlockAnchors}] = ets:lookup(node_state, block_anchors),
 			[{recent_txs_map, RecentTXMap}] = ets:lookup(node_state, recent_txs_map),
-			io:format("start_mining 5~n"), % TODO remove after debug finished, before commit
 			ar_watchdog:started_hashing(),
-			Miner = ar_mine:start_server_ext({
+			io:format("start ~n"),
+			io:format("IOThreads count ~p ~n", [length(IOThreads)]),
+			NewMiner = ar_mine:start_server_ext({
 				ar_pool_miner,
 				CurrentB,
 				<<"skip">>, % RewardAddr, should be unused
@@ -114,26 +115,25 @@ start_mining(StateIn) ->
 				SearchSpaceUpperBound,
 				IOThreads,
 				BI,
-				BDSBase
+				BDSBase,
+				ShareDiff,
+				NonceFilter
 			}),
-			io:format("start_mining 6~n"), % TODO remove after debug finished, before commit
 			?LOG_INFO([{event, started_mining}]),
-			StateIn#{ miner => Miner };
+			StateIn#{ miner => NewMiner };
 		_ ->
 			StateIn
 	end,
-	io:format("start_mining end~n").
+	io:format("start_mining end~n"),
+	Ret.
 
 start(MineJSON) ->
 	% io:format("MineJSON ~p ~n", [MineJSON]),
-	% io:format("WTF share_diff ~p ~n", [maps:get(<<"share_diff">>, MineJSON, <<>>)]),
 	State = maps:get(<<"state">>, MineJSON, #{}),
 	Block = maps:get(<<"block">>, State, #{}),
-	% io:format("State ~p ~n", [State]),
-	% io:format("Block ~p ~n", [Block]),
 	MineArg = #mine_arg{
 		nonce_filter  = ar_util:decode(maps:get(<<"nonce_filter">>, MineJSON, <<>>)),
-		share_diff    = ar_util:decode(maps:get(<<"share_diff">>, MineJSON, <<>>)),
+		share_diff    = binary_to_integer(maps:get(<<"share_diff">>, MineJSON, <<>>)),
 		bds           = ar_util:decode(maps:get(<<"bds">>, State, <<>>)),
 		bds_base      = ar_util:decode(maps:get(<<"bds_base">>, State, <<>>)),
 		swap_height   = maps:get(<<"swap_height">>, State, <<>>),
@@ -165,7 +165,6 @@ start(MineJSON) ->
 			txs             = maps:get(<<"txs">>, Block, [])
 		}
 	},
-	io:format("gen_server:cast 1 ~n"),
 	gen_server:cast(?MODULE, {mine, MineArg}),
-	io:format("gen_server:cast 2 ~n"),
+	% TODO return completed jobs
 	[].

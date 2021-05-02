@@ -81,6 +81,9 @@
 -define(MINING_TIMESTAMP_REFRESH_INTERVAL, 10).
 -endif.
 
+% actually we need perform faster, because pool latency, network latency etc
+-define(MINING_TIMESTAMP_REFRESH_INTERVAL_REAL, 5).
+
 %% The total supply of tokens in the Genesis block.
 -define(GENESIS_TOKENS, 55000000).
 
