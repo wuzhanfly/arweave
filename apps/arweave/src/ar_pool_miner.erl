@@ -3,7 +3,7 @@
 
 
 -export([start_link/0]).
--export([init/1, handle_cast/2, terminate/2]).
+-export([init/1, handle_cast/2, handle_info/2, terminate/2]).
 -export([start/1]).
 
 -include_lib("arweave/include/ar_config.hrl").
@@ -56,10 +56,9 @@ handle_cast({mine, MineArg}, State) ->
 	}),
 	{noreply, NewState};
 
-handle_cast({work_complete, _CurrentBH, B2, _MinedTXs, _BDS, _SPoA}, State) ->
-	io:format("work_complete~n"),
-
+handle_cast({work_complete, CurrentBH, B2, MinedTXs, BDS, SPoA}, State) ->
 	#{ solution_list := SolutionList } = State,
+	io:format("work_complete ~p ~n", [length(SolutionList)]),
 	{noreply, State#{
 		solution_list => [B2 | SolutionList]
 	}};
@@ -75,6 +74,9 @@ terminate(_Reason, #{ miner := Miner }) ->
 	end.
 
 
+handle_info({work_complete, BaseBH, NewB, MinedTXs, BDS, POA}, State) ->
+	gen_server:cast(?MODULE, {work_complete, BaseBH, NewB, MinedTXs, BDS, POA}),
+	{noreply, State}.
 
 
 start_mining(StateIn) ->

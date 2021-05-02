@@ -148,20 +148,16 @@ validate_spora(BDS, Nonce, Timestamp, Height, Diff, PrevH, SearchSpaceUpperBound
 	SolutionHash = spora_solution_hash(PrevH, Timestamp, H0, SPoA#poa.chunk, Height),
 	case validate(SolutionHash, Diff, Height) of
 		false ->
-			io:format("validate_spora b1 false ~n"),
 			false;
 		true ->
 			case pick_recall_byte(H0, PrevH, SearchSpaceUpperBound) of
 				{error, weave_size_too_small} ->
-					io:format("validate_spora b2 unreach ~n"),
 					SPoA == #poa{};
 				{ok, RecallByte} ->
 					case ar_poa:validate(RecallByte, BI, SPoA) of
 						false ->
-							io:format("validate_spora b3 false ~n"),
 							false;
 						true ->
-							io:format("validate_spora b4 ok ~p ~n", [SolutionHash]),
 							{true, SolutionHash}
 					end
 			end
@@ -648,7 +644,6 @@ start_hashing_threads2(S) ->
 		false ->
 			Diff
 	end,
-	io:format("start_hashing_threads2 CmpDiff ~p ~n", [CmpDiff]),
 	HashingThreads =
 		[spawn(
 			fun() ->
@@ -736,7 +731,6 @@ server(
 								false ->
 									B#block.diff
 							end,
-							io:format("CmpDiff ~p ~n", [CmpDiff]),
 							case validate_spora(
 								BDS,
 								Nonce,
@@ -758,10 +752,16 @@ server(
 									case PoolMine of
 										true ->
 											do_nothing;
-										true ->
+										false ->
 											stop_miners(S)
 									end,
-									process_spora_solution(BDS, B2, MinedTXs, S);
+									process_spora_solution(BDS, B2, MinedTXs, S),
+									case PoolMine of
+										true ->
+											server(S);
+										false ->
+											ok
+									end;
 								_ ->
 									?LOG_ERROR([
 										{event, miner_produced_invalid_spora},
