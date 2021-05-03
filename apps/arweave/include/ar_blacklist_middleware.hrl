@@ -16,6 +16,8 @@ end).
 -ifdef(DEBUG).
 -define(RPM_BY_PATH(Path, DefaultPathLimit), fun() ->
 	case Path of
+		[<<"mine">> | _]             -> {mine,             120000};
+		[<<"mine_get_results">> | _] -> {mine_get_results, 120000};
 		[<<"chunk">> | _]            -> {chunk,            120000};
 		[<<"data_sync_record">> | _] -> {data_sync_record, 200};
 		_ ->                            {default,          DefaultPathLimit}
@@ -24,6 +26,8 @@ end).
 -else.
 -define(RPM_BY_PATH(Path, DefaultPathLimit), fun() ->
 	case Path of
+		[<<"mine">> | _]             -> {mine,             120000};
+		[<<"mine_get_results">> | _] -> {mine_get_results, 120000};
 		[<<"chunk">> | _]            -> {chunk,            12000}; % sufficient to upload 50 MB/s
 		[<<"data_sync_record">> | _] -> {data_sync_record, 20};
 		_ ->                            {default,          DefaultPathLimit}
