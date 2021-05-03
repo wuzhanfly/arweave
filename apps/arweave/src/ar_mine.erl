@@ -575,6 +575,7 @@ reschedule_timestamp_refresh(S = #state{
 start_miners(S) ->
 	ets:insert(mining_state, [
 		{started_at, os:timestamp()},
+		{stage1_hash_count, 0},
 		{sporas, 0},
 		{kibs, 0},
 		{recall_bytes_computed, 0}
@@ -714,7 +715,7 @@ server(
 		{solution, Nonce, H0, Timestamp, Hash} ->
 			case maps:get(Timestamp, BlocksByTimestamp, not_found) of
 				not_found ->
-					io:format("server solution stale ~n"),
+					io:format("server solution stale ~p ~p ~n", [Timestamp, os:system_time(seconds)]),
 					%% A stale solution.
 					server(S);
 				{#block{ timestamp = Timestamp } = B, BDS} ->
@@ -834,14 +835,19 @@ notify_hashing_threads(S) ->
 io_thread(SearchInRocksDB) ->
 	[{_, {SessionRef, SessionTimestamp}}] = ets:lookup(mining_state, session),
 	receive
-		{EncodedByte, H0, Nonce, HashingThread, {Timestamp, Diff, SessionRef}}
-				when Timestamp + 19 > SessionTimestamp ->
-			Byte = binary:decode_unsigned(EncodedByte, big),
-			case read_chunk(Byte, SearchInRocksDB) of
-				not_found ->
-					io_thread(SearchInRocksDB);
-				Chunk ->
-					HashingThread ! {chunk, H0, Nonce, Timestamp, Diff, Chunk, SessionRef},
+		{EncodedByte, H0, Nonce, HashingThread, {Timestamp, Diff, SessionRef}} ->
+			ets:update_counter(mining_state, stage1_hash_count, 1),
+			case Timestamp + 19 > SessionTimestamp of
+				true ->
+					Byte = binary:decode_unsigned(EncodedByte, big),
+					case read_chunk(Byte, SearchInRocksDB) of
+						not_found ->
+							io_thread(SearchInRocksDB);
+						Chunk ->
+							HashingThread ! {chunk, H0, Nonce, Timestamp, Diff, Chunk, SessionRef},
+							io_thread(SearchInRocksDB)
+					end;
+				false ->
 					io_thread(SearchInRocksDB)
 			end;
 		{'EXIT', _From, _Reason} ->
@@ -1061,7 +1067,9 @@ log_spora_performance() ->
 			[{_, RecallBytes}] = ets:lookup(mining_state, recall_bytes_computed),
 			[{_, KiBs}] = ets:lookup(mining_state, kibs),
 			[{_, SPoRAs}] = ets:lookup(mining_state, sporas),
+			[{_, Stage1_hash_count}] = ets:lookup(mining_state, stage1_hash_count),
 			RecallByteRate = RecallBytes / (Time / 1000000),
+			Rate_stage1 = Stage1_hash_count / (Time / 1000000),
 			Rate = SPoRAs / (Time / 1000000),
 			ReadRate = KiBs / 1024 / (Time / 1000000),
 			prometheus_histogram:observe(mining_rate, Rate),
@@ -1073,9 +1081,9 @@ log_spora_performance() ->
 				{round_time_seconds, Time div 1000000}
 			]),
 			ar:console(
-				"Miner spora rate: ~B h/s, recall bytes computed/s: ~B, MiB/s read: ~B,"
+				"Stage1 rate: ~B h/s, Miner spora rate: ~B h/s, recall bytes computed/s: ~B, MiB/s read: ~B,"
 				" the round lasted ~B seconds.~n",
-				[trunc(Rate), trunc(RecallByteRate), trunc(ReadRate), Time div 1000000]
+				[trunc(Rate_stage1), trunc(Rate), trunc(RecallByteRate), trunc(ReadRate), Time div 1000000]
 			)
 	end.
 
