@@ -37,8 +37,8 @@
 	tags,
 	diff,
 	bds_base = not_generated,
-	share_diff = not_generated,
-	nonce_filter = not_generated,
+	share_diff = not_used,
+	nonce_filter = not_used,
 	pool_mine,
 	small_weave_hasher,
 	stage_one_hasher,
@@ -589,6 +589,7 @@ start_hashing_threads(S) ->
 		small_weave_hasher = SmallWeaveHasher,
 		stage_two_hasher = StageTwoHasher,
 		search_space_upper_bound = SearchSpaceUpperBound,
+		nonce_filter = NonceFilter,
 		session_ref = SessionRef
 	} = S,
 	Subspaces = ?SPORA_SEARCH_SPACE_SUBSPACES_COUNT,
@@ -607,7 +608,8 @@ start_hashing_threads(S) ->
 						SmallWeaveHasher,
 						StageTwoHasher,
 						Parent,
-						SessionRef
+						SessionRef,
+						NonceFilter
 					})
 				end
 			),
@@ -627,6 +629,7 @@ start_hashing_threads2(S) ->
 		search_space_upper_bound = SearchSpaceUpperBound,
 		pool_mine = PoolMine,
 		share_diff = ShareDiff,
+		nonce_filter = NonceFilter,
 		session_ref = SessionRef
 	} = S,
 	{ok, Config} = application:get_env(arweave, config),
@@ -673,7 +676,8 @@ start_hashing_threads2(S) ->
 					ar_mine_randomx:jit(),
 					ar_mine_randomx:large_pages(),
 					ar_mine_randomx:hardware_aes(),
-					SessionRef
+					SessionRef,
+					NonceFilter
 				}, Type)
 			end)
 			|| N <- lists:seq(1, ThreadCount)],
@@ -878,7 +882,8 @@ small_weave_hashing_thread(Args) ->
 		Hasher,
 		StageTwoHasher,
 		Parent,
-		SessionRef
+		SessionRef,
+		NonceFilter
 	} = Args,
 	receive
 		{update_state, Timestamp2, Diff2, BDS2, _Threads, SessionRef} ->
@@ -891,11 +896,17 @@ small_weave_hashing_thread(Args) ->
 				Hasher,
 				StageTwoHasher,
 				Parent,
-				SessionRef
+				SessionRef,
+				NonceFilter
 			})
 	after 0 ->
-		% TODO nonce_filter
-		Nonce = crypto:strong_rand_bytes(32),
+		Nonce = case NonceFilter of
+			not_used ->
+				crypto:strong_rand_bytes(32);
+			_ ->
+				B24 = crypto:strong_rand_bytes(24),
+				<< B24/binary, NonceFilter/binary >>
+		end,
 		H0 = Hasher(<< Nonce/binary, BDS/binary >>),
 		TimestampBinary = << Timestamp:(?TIMESTAMP_FIELD_SIZE_LIMIT * 8) >>,
 		Preimage = [H0, PrevH, TimestampBinary, <<>>],
@@ -926,7 +937,8 @@ hashing_thread(S, Type) ->
 		JIT,
 		LargePages,
 		HardwareAES,
-		SessionRef
+		SessionRef,
+		NonceFilter
 	} = S,
 	T = case Type of stage_one_thread -> 0; stage_two_thread -> 200 end,
 	receive
@@ -959,16 +971,28 @@ hashing_thread(S, Type) ->
 				JIT,
 				LargePages,
 				HardwareAES,
-				SessionRef
+				SessionRef,
+				NonceFilter
 			}, Type);
 		_ ->
 			hashing_thread(S, Type)
 	after T ->
 		case Type of
 			stage_one_thread when StageTwoThreads /= [] ->
-				Nonce1 = crypto:strong_rand_bytes(256 div 8),
-				% TODO nonce_filter
-				Nonce2 = crypto:strong_rand_bytes(256 div 8),
+				Nonce1 = case NonceFilter of
+					not_used ->
+						crypto:strong_rand_bytes(256 div 8);
+					_ ->
+						B24 = crypto:strong_rand_bytes(24),
+						<< B24/binary, NonceFilter/binary >>
+				end,
+				Nonce2 = case NonceFilter of
+					not_used ->
+						crypto:strong_rand_bytes(256 div 8);
+					_ ->
+						B24_2 = crypto:strong_rand_bytes(24),
+						<< B24_2/binary, NonceFilter/binary >>
+				end,
 				Ref = {Timestamp, Diff, SessionRef},
 				ok = Hasher(
 					Nonce1,
@@ -1004,7 +1028,8 @@ hashing_thread(S, Type) ->
 			JIT,
 			LargePages,
 			HardwareAES,
-			SessionRef
+			SessionRef,
+			NonceFilter
 		}, Type)
 	end.
 

@@ -185,6 +185,7 @@ get_results() ->
 			{tx_root, ar_util:encode(NewCandidateB#block.tx_root)},
 			{txs, lists:map(fun(TX) -> ar_util:encode(TX) end, NewCandidateB#block.txs)},
 			{reward_addr, ar_util:encode(NewCandidateB#block.reward_addr)},
+			{nonce, ar_util:encode(NewCandidateB#block.nonce)},
 			{tags, []}
 		]}
 	end, SolutionList).

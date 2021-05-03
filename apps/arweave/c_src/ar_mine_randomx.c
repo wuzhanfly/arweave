@@ -488,7 +488,9 @@ static ERL_NIF_TERM bulk_hash_fast_nif(ErlNifEnv* envPtr, int argc, const ERL_NI
 		if (i == 0) {
 			memcpy(nonce, secondNonceBinary.data, RANDOMX_HASH_SIZE);
 		} else {
-			memcpy(nonce, hashPtr, RANDOMX_HASH_SIZE);
+			//memcpy(nonce, hashPtr, RANDOMX_HASH_SIZE);
+			// will be enough for hash iterations up to 256**4
+			nonce[i%4]++;
 		}
 		if (i == hashingIterations - 1) {
 			randomx_calculate_hash_last(vmPtr, hashPtr);
