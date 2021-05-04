@@ -154,7 +154,7 @@ start(MineJSON) ->
 			reward_pool     = binary_to_integer(maps:get(<<"reward_pool">>, Block, <<>>)),
 			last_retarget   = maps:get(<<"last_retarget">>, Block, <<>>),
 			previous_block  = ar_util:decode(maps:get(<<"previous_block">>, Block, <<>>)),
-			hash_list       = ar_util:decode(maps:get(<<"hash_list">>, Block, <<>>)),
+			% hash_list       = ar_util:decode(maps:get(<<"hash_list">>, Block, <<>>)),
 			hash_list_merkle= ar_util:decode(maps:get(<<"hash_list_merkle">>, Block, <<>>)),
 			reward_addr     = ar_util:decode(maps:get(<<"reward_addr">>, Block, <<>>)),
 			timestamp       = maps:get(<<"timestamp">>, Block, <<>>),
@@ -168,26 +168,35 @@ start(MineJSON) ->
 
 get_results() ->
 	#{ solution_list := SolutionList } = gen_server:call(?MODULE, {get_results}),
+	% lists:map(fun(NewCandidateB) ->
+	% 	{[
+	% 		{height,          NewCandidateB#block.height},
+	% 		{hash_list,       ar_util:encode(NewCandidateB#block.hash_list)},
+	% 		{previous_block,  ar_util:encode(NewCandidateB#block.previous_block)},
+	% 		{hash_list_merkle,ar_util:encode(NewCandidateB#block.hash_list_merkle)},
+	% 		{timestamp,       NewCandidateB#block.timestamp},
+	% 		{last_retarget,   NewCandidateB#block.last_retarget},
+	% 		{diff,            integer_to_binary(NewCandidateB#block.diff)},
+	% 		{cumulative_diff, integer_to_binary(NewCandidateB#block.cumulative_diff)},
+	% 		{block_size,      integer_to_binary(NewCandidateB#block.block_size)},
+	% 		{weave_size,      integer_to_binary(NewCandidateB#block.weave_size)},
+	% 		{reward_pool,     integer_to_binary(NewCandidateB#block.reward_pool)},
+	% 		{wallet_list,     ar_util:encode(NewCandidateB#block.wallet_list)},
+	% 		{tx_root,         ar_util:encode(NewCandidateB#block.tx_root)},
+	% 		{txs, lists:map(fun(TX) -> ar_util:encode(TX) end, NewCandidateB#block.txs)},
+	% 		{reward_addr,     ar_util:encode(NewCandidateB#block.reward_addr)},
+	% 		{nonce,           ar_util:encode(NewCandidateB#block.nonce)},
+	% 		{indep_hash,      ar_util:encode(NewCandidateB#block.indep_hash)},
+	% 		{hash,            ar_util:encode(NewCandidateB#block.hash)},
+	% 		{tags,            NewCandidateB#block.tags},
+	% 		{poa, {[
+	% 			{option,    integer_to_binary(NewCandidateB#block.poa#poa.option)},
+	% 			{tx_path,   ar_util:encode(NewCandidateB#block.poa#poa.tx_path)},
+	% 			{data_path, ar_util:encode(NewCandidateB#block.poa#poa.data_path)},
+	% 			{chunk,     ar_util:encode(NewCandidateB#block.poa#poa.chunk)}
+	% 		]}}
+	% 	]}
+	% end, SolutionList).
 	lists:map(fun(NewCandidateB) ->
-		{[
-			{height, NewCandidateB#block.height},
-			{hash_list, ar_util:encode(NewCandidateB#block.hash_list)},
-			{previous_block, ar_util:encode(NewCandidateB#block.previous_block)},
-			{hash_list_merkle, ar_util:encode(NewCandidateB#block.hash_list_merkle)},
-			{timestamp, NewCandidateB#block.timestamp},
-			{last_retarget, NewCandidateB#block.last_retarget},
-			{diff, integer_to_binary(NewCandidateB#block.diff)},
-			{cumulative_diff, integer_to_binary(NewCandidateB#block.cumulative_diff)},
-			{block_size, integer_to_binary(NewCandidateB#block.block_size)},
-			{weave_size, integer_to_binary(NewCandidateB#block.weave_size)},
-			{reward_pool, integer_to_binary(NewCandidateB#block.reward_pool)},
-			{wallet_list, ar_util:encode(NewCandidateB#block.wallet_list)},
-			{tx_root, ar_util:encode(NewCandidateB#block.tx_root)},
-			{txs, lists:map(fun(TX) -> ar_util:encode(TX) end, NewCandidateB#block.txs)},
-			{reward_addr, ar_util:encode(NewCandidateB#block.reward_addr)},
-			{nonce, ar_util:encode(NewCandidateB#block.nonce)},
-			{indep_hash, ar_util:encode(NewCandidateB#block.indep_hash)},
-			{hash, ar_util:encode(NewCandidateB#block.hash)},
-			{tags, []}
-		]}
+		ar_serialize:block_to_json_struct(NewCandidateB)
 	end, SolutionList).
