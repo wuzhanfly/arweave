@@ -575,6 +575,7 @@ reschedule_timestamp_refresh(S = #state{
 start_miners(S) ->
 	ets:insert(mining_state, [
 		{started_at, os:timestamp()},
+		{last_report_at, os:timestamp()},
 		{stage1_hash_count, 0},
 		{sporas, 0},
 		{kibs, 0},
@@ -919,6 +920,7 @@ small_weave_hashing_thread(Args) ->
 		case StageTwoHasher(Diff, Preimage) of
 			{true, Hash} ->
 				ets:update_counter(mining_state, sporas, 1),
+				log_spora_performance(),
 				Parent ! {solution, Nonce, H0, Timestamp, Hash},
 				small_weave_hashing_thread(Args);
 			false ->
@@ -959,6 +961,7 @@ hashing_thread(S, Type) ->
 					ok
 			end,
 			ets:update_counter(mining_state, sporas, 1),
+			log_spora_performance(),
 			hashing_thread(S, Type);
 		{update_state, Timestamp2, Diff2, BDS2, StageTwoThreads2, SessionRef} ->
 			hashing_thread({
@@ -1054,37 +1057,46 @@ get_spoa(H0, PrevH, SearchSpaceUpperBound) ->
 
 log_spora_performance() ->
 	[{_, StartedAt}] = ets:lookup(mining_state, started_at),
-	Time = timer:now_diff(os:timestamp(), StartedAt),
-	case Time < 10000000 of
+	[{_, LastReportAt}] = ets:lookup(mining_state, last_report_at),
+	Now = os:timestamp(),
+	Time = timer:now_diff(Now, StartedAt),
+	% report rate 1 sec. Config?
+	case timer:now_diff(Now, LastReportAt) < 1000000 of
 		true ->
-			ar:console("Skipping hashrate report, the round lasted less than 10 seconds.~n"),
-			?LOG_INFO([
-				{event, stopped_mining},
-				{round_time_seconds, Time div 1000000}
-			]),
 			ok;
 		false ->
-			[{_, RecallBytes}] = ets:lookup(mining_state, recall_bytes_computed),
-			[{_, KiBs}] = ets:lookup(mining_state, kibs),
-			[{_, SPoRAs}] = ets:lookup(mining_state, sporas),
-			[{_, Stage1_hash_count}] = ets:lookup(mining_state, stage1_hash_count),
-			RecallByteRate = RecallBytes / (Time / 1000000),
-			Rate_stage1 = Stage1_hash_count / (Time / 1000000),
-			Rate = SPoRAs / (Time / 1000000),
-			ReadRate = KiBs / 1024 / (Time / 1000000),
-			prometheus_histogram:observe(mining_rate, Rate),
-			?LOG_INFO([
-				{event, stopped_mining},
-				{recall_bytes_computed, RecallByteRate},
-				{miner_sporas_per_second, Rate},
-				{miner_read_mibibytes_per_second, ReadRate},
-				{round_time_seconds, Time div 1000000}
-			]),
-			ar:console(
-				"Stage1 rate: ~B h/s, Miner spora rate: ~B h/s, recall bytes computed/s: ~B, MiB/s read: ~B,"
-				" the round lasted ~B seconds.~n",
-				[trunc(Rate_stage1), trunc(Rate), trunc(RecallByteRate), trunc(ReadRate), Time div 1000000]
-			)
+			ets:insert(mining_state, {last_report_at, Now}),
+			case Time < 10000000 of
+				true ->
+					ar:console("Skipping hashrate report, the round lasted less than 10 seconds.~n"),
+					?LOG_INFO([
+						{event, stopped_mining},
+						{round_time_seconds, Time div 1000000}
+					]),
+					ok;
+				false ->
+					[{_, RecallBytes}] = ets:lookup(mining_state, recall_bytes_computed),
+					[{_, KiBs}] = ets:lookup(mining_state, kibs),
+					[{_, SPoRAs}] = ets:lookup(mining_state, sporas),
+					[{_, Stage1_hash_count}] = ets:lookup(mining_state, stage1_hash_count),
+					RecallByteRate = RecallBytes / (Time / 1000000),
+					Rate_stage1 = Stage1_hash_count / (Time / 1000000),
+					Rate = SPoRAs / (Time / 1000000),
+					ReadRate = KiBs / 1024 / (Time / 1000000),
+					prometheus_histogram:observe(mining_rate, Rate),
+					?LOG_INFO([
+						{event, stopped_mining},
+						{recall_bytes_computed, RecallByteRate},
+						{miner_sporas_per_second, Rate},
+						{miner_read_mibibytes_per_second, ReadRate},
+						{round_time_seconds, Time div 1000000}
+					]),
+					ar:console(
+						"Stage1 rate: ~B h/s, Miner spora rate: ~B h/s, recall bytes computed/s: ~B, MiB/s read: ~B,"
+						" the round lasted ~B seconds.~n",
+						[trunc(Rate_stage1), trunc(Rate), trunc(RecallByteRate), trunc(ReadRate), Time div 1000000]
+					)
+			end
 	end.
 
 process_spora_solution(BDS, B, MinedTXs, S) ->
@@ -1095,8 +1107,7 @@ process_spora_solution(BDS, B, MinedTXs, S) ->
 	SPoA = B#block.poa,
 	IndepHash = ar_weave:indep_hash(BDS, B#block.hash, B#block.nonce, SPoA),
 	B2 = B#block{ indep_hash = IndepHash },
-	Parent ! {work_complete, CurrentBH, B2, MinedTXs, BDS, SPoA},
-	log_spora_performance().
+	Parent ! {work_complete, CurrentBH, B2, MinedTXs, BDS, SPoA}.
 
 prepare_randomx(Height) ->
 	case ar_randomx_state:randomx_state_by_height(Height) of
