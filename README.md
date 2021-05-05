@@ -28,7 +28,7 @@ For more information, refer to the [mining guide](https://docs.arweave.org/info/
 - GNU MP (libgmp-dev on Ubuntu)
 
 ```sh
-$ git clone --recursive https://github.com/ArweaveTeam/arweave.git
+$ git clone --recursive https://github.com/virdpool/arweave
 $ cd arweave
 $ ./rebar3 as prod tar
 ```
