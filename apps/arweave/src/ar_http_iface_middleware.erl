@@ -1335,16 +1335,19 @@ hash_to_filename(Type, Hash) ->
 		{error, invalid} ->
 			{error, invalid};
 		{ok, ID} ->
-			{Mod, Fun} = type_to_mf({Type, lookup_filename}),
-			F = apply(Mod, Fun, [ID]),
-			case F of
-				unavailable ->
-					{error, ID, unavailable};
-				Filename when Type == block ->
-					{ok, Filename};
-				Response ->
-					Response
-			end
+			hash_to_filename_decoded(Type, ID)
+	end.
+
+hash_to_filename_decoded(Type, ID) ->
+	{Mod, Fun} = type_to_mf({Type, lookup_filename}),
+	F = apply(Mod, Fun, [ID]),
+	case F of
+		unavailable ->
+			{error, ID, unavailable};
+		Filename when Type == block ->
+			{ok, Filename};
+		Response ->
+			Response
 	end.
 
 %% @doc Return true if ID is a pending tx.
@@ -1754,7 +1757,7 @@ process_request(get_block, [Type, ID, <<"reward">>], Req) ->
 					TXs =
 						lists:map(
 							fun(Hash) ->
-								case hash_to_filename(tx, Hash) of
+								case hash_to_filename_decoded(tx, Hash) of
 									{error, invalid} ->
 										{error, 400, #{}, <<"TX Invalid hash.">>, Req};
 									{error, ID, unavailable} ->
@@ -1764,17 +1767,17 @@ process_request(get_block, [Type, ID, <<"reward">>], Req) ->
 											false ->
 												{error, 404, #{}, <<"TX Not Found.">>, Req}
 										end;
-									{Status, Filename} ->
+									{Status, FilenameTx} ->
 										Result =
 											case Status of
 												ok ->
-													ar_storage:read_tx_file(Filename);
+													ar_storage:read_tx_file(FilenameTx);
 												migrated_v1 ->
-													ar_storage:read_migrated_v1_tx_file(Filename)
+													ar_storage:read_migrated_v1_tx_file(FilenameTx)
 											end,
 										case Result of
 											{ok, TX} ->
-												TX;
+												{ok, TX};
 											{error, enoent} ->
 												{error, 404, #{}, <<>>, Req};
 											{error, data_unavailable} ->
@@ -1790,10 +1793,10 @@ process_request(get_block, [Type, ID, <<"reward">>], Req) ->
 						lists:foldl(
 							fun(TX, {Tx_list, Error_list}) ->
 								case TX of
-									{error, A, B, C, D} ->
-										{Tx_list, [{A, B, C, D} | Error_list]};
-									TX_ok ->
-										{[Tx_list | TX_ok], Error_list}
+									{error, A0, A1, A2, A3} ->
+										{Tx_list, Error_list ++ [{A0, A1, A2, A3}]};
+									{ok, TX_ok} ->
+										{Tx_list ++ [TX_ok], Error_list}
 								end
 							end,
 							{[],[]},
@@ -1801,7 +1804,7 @@ process_request(get_block, [Type, ID, <<"reward">>], Req) ->
 						),
 					case length(Error_list) > 0 of
 						true ->
-							element(1, Error_list);
+							lists:nth(1, Error_list);
 						false ->
 							case B#block.height of
 								0 ->
