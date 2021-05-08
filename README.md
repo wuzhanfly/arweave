@@ -28,9 +28,16 @@ For more information, refer to the [mining guide](https://docs.arweave.org/info/
 - GNU MP (libgmp-dev on Ubuntu)
 
 ```sh
-$ git clone --recursive https://github.com/ArweaveTeam/arweave.git
+$ git clone --recursive https://github.com/virdpool/arweave
 $ cd arweave
 $ ./rebar3 as prod tar
+```
+
+for virdpool.testnet use
+```
+./rebar3 as virdpool_testnet tar
+cd _build/virdpool_testnet/rel/arweave
+./bin/start port 2984 peer 95.216.170.175:2984 peer 65.21.152.47:2984
 ```
 
 You will then find the gzipped tarball at `_build/prod/rel/arweave/arweave-x.y.z.tar.gz`.
