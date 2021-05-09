@@ -130,6 +130,7 @@ start_mining(StateIn) ->
 start(MineJSON) ->
 	State = maps:get(<<"state">>, MineJSON, #{}),
 	Block = maps:get(<<"block">>, State, #{}),
+	TXIDs = maps:get(<<"txs">>, Block, []),
 	MineArg = #mine_arg{
 		nonce_filter  = ar_util:decode(maps:get(<<"nonce_filter">>, MineJSON, <<>>)),
 		share_diff    = binary_to_integer(maps:get(<<"share_diff">>, MineJSON, <<>>)),
@@ -161,7 +162,7 @@ start(MineJSON) ->
 			tx_root         = ar_util:decode(maps:get(<<"tx_root">>, Block, <<>>)),
 			wallet_list     = ar_util:decode(maps:get(<<"wallet_list">>, Block, <<>>)),
 			tags            = maps:get(<<"tags">>, Block, []), % NOT sure that it will work correctly
-			txs             = maps:get(<<"txs">>, Block, [])
+			txs             = [ar_util:decode(TXID) || TXID <- TXIDs]
 		}
 	},
 	gen_server:cast(?MODULE, {mine, MineArg}).
