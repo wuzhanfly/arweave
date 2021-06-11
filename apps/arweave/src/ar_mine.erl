@@ -110,6 +110,7 @@ start_server_ext(Args)->
 		CandidateB, TXs, SearchSpaceUpperBound, IOThreads, BI,
 		BDSBase, ShareDiff, NonceFilter
 	} = Args,
+	CurrentHeight = CurrentB#block.height,
 	State =
 		#state {
 			parent = Parent,
