@@ -83,7 +83,6 @@ start(Args) ->
 			block_index = BI,
 			session_ref = make_ref(),
 			pool_mine = false
-			session_ref = make_ref()
 		},
 	State2 =
 		case CurrentHeight + 1 >= ar_fork:height_2_5() of
@@ -972,13 +971,14 @@ io_thread(SearchInRocksDB) ->
 							io_thread(SearchInRocksDB);
 						{ok, #{ chunk := Chunk }} ->
 							HashingThread ! {chunk, H0, Nonce, Timestamp, Diff, Chunk, SessionRef},
-							io_thread(SearchInRocksDB)
+							io_thread(SearchInRocksDB);
 						{ok, Chunk} ->
 							HashingThread ! {chunk, H0, Nonce, Timestamp, Diff, Chunk, SessionRef},
 							io_thread(SearchInRocksDB)
 					end;
 				false ->
 					io_thread(SearchInRocksDB)
+			end;
 		{'EXIT', _From, _Reason} ->
 			ar_chunk_storage:close_files();
 		_ ->
@@ -1229,6 +1229,7 @@ log_spora_performance() ->
 						" the round lasted ~B seconds.~n",
 						[trunc(Rate), trunc(RecallByteRate), trunc(ReadRate), Time div 1000000]
 					)
+			end
 	end.
 
 process_spora_solution(BDS, B, MinedTXs, S) ->
