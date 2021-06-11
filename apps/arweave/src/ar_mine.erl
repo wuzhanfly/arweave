@@ -110,7 +110,7 @@ start_server_ext(Args)->
 		CandidateB, TXs, SearchSpaceUpperBound, IOThreads, BI,
 		BDSBase, ShareDiff, NonceFilter
 	} = Args,
-	start_server(
+	State =
 		#state {
 			parent = Parent,
 			current_block = CurrentB,
@@ -129,8 +129,22 @@ start_server_ext(Args)->
 			nonce_filter = NonceFilter,
 			session_ref = make_ref(),
 			pool_mine = true
-		}
-	).
+		},
+	State2 =
+		case CurrentHeight + 1 >= ar_fork:height_2_5() of
+			false ->
+				State;
+			true ->
+				{Rate, ScheduledRate} = ar_pricing:recalculate_usd_to_ar_rate(CurrentB),
+				State#state{
+					candidate_block =
+						CandidateB#block{
+							usd_to_ar_rate = Rate,
+							scheduled_usd_to_ar_rate = ScheduledRate
+						}
+				}
+		end,
+	start_server(State2).
 
 %% @doc Validate that a given hash/nonce satisfy the difficulty requirement.
 validate(BDS, Nonce, Diff, Height) ->
@@ -487,7 +501,7 @@ update_data_segment_pre_fork_2_5_pool(S, BlockTimestamp, Diff) ->
 		candidate_block = NewCandidateB,
 		blocks_by_timestamp = BlocksByTimestamp2
 	},
-	ets:insert(mining_state, {session, {SessionRef, BlockTimestamp}}),
+	ets:insert(mining_state, {session, {SessionRef, BlockTimestamp, Height}}),
 	reschedule_timestamp_refresh(NewS).
 
 %% @doc Generate a new data_segment and update the timestamp and diff.
