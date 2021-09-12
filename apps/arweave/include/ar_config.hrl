@@ -63,6 +63,7 @@
 	init = false,
 	port = ?DEFAULT_HTTP_IFACE_PORT,
 	mine = false,
+	pool_mine = false,
 	peers = [],
 	data_dir = ".",
 	metrics_dir = ?METRICS_DIR,
