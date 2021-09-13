@@ -104,7 +104,7 @@ stop(PID) ->
 
 start_server_ext(Args)->
 	{
-		CurrentB, RewardAddr, Tags, BlockAnchors, RecentTXMap,
+		Parent, CurrentB, RewardAddr, Tags, BlockAnchors, RecentTXMap,
 		CandidateB, TXs, SearchSpaceUpperBound, IOThreads, BI,
 		BDSBase, ShareDiff, NonceFilter
 	} = Args,
@@ -437,6 +437,7 @@ update_data_segment_pool(State, Timestamp, Diff) ->
 	#state{ candidate_block = #block{ height = Height } } = State,
 	case Height >= ar_fork:height_2_5() of
 		true ->
+			% TODO make update_data_segment2_pool
 			update_data_segment2(State, Timestamp, Diff);
 		false ->
 			update_data_segment_pre_fork_2_5_pool(State, Timestamp, Diff)
@@ -811,7 +812,6 @@ start_hashing_threads2(S) ->
 					Height,
 					Timestamp,
 					CmpDiff,
-					Diff,
 					BDS,
 					Hasher,
 					StageTwoHasher,
@@ -875,7 +875,6 @@ server(
 								Timestamp,
 								Height,
 								CmpDiff,
-								B#block.diff,
 								PrevH,
 								SearchSpaceUpperBound,
 								SPoA,
