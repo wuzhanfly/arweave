@@ -666,7 +666,7 @@ update_data_segment_pre_fork_2_5_pool(S, BlockTimestamp, Diff) ->
 		candidate_block = NewCandidateB,
 		blocks_by_timestamp = BlocksByTimestamp2
 	},
-	ets:insert(mining_state, {session, {SessionRef, BlockTimestamp, Height}}),
+	ets:insert(mining_state, {session, {SessionRef, BlockTimestamp, not_set, Height}}),
 	reschedule_timestamp_refresh(NewS).
 
 update_data_segment_pre_fork_2_5(S, BlockTimestamp, Diff) ->
