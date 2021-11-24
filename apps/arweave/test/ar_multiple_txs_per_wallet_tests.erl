@@ -1,20 +1,24 @@
 -module(ar_multiple_txs_per_wallet_tests).
 
 -include_lib("arweave/include/ar.hrl").
+-include_lib("arweave/include/ar_pricing.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
--import(ar_test_node, [start/1, slave_start/1, connect_to_slave/0]).
--import(ar_test_node, [slave_mine/0, join_on_slave/0]).
--import(ar_test_node, [assert_wait_until_receives_txs/1]).
--import(ar_test_node, [wait_until_height/1, assert_slave_wait_until_height/1]).
--import(ar_test_node, [slave_call/3, assert_wait_until_block_block_index/1 ]).
--import(ar_test_node, [post_tx_to_slave/1, post_tx_to_master/1]).
--import(ar_test_node, [assert_post_tx_to_slave/1, assert_post_tx_to_master/1]).
--import(ar_test_node, [sign_tx/2, sign_tx/3, sign_v1_tx/1, sign_v1_tx/2]).
--import(ar_test_node, [sign_v1_tx/3]).
--import(ar_test_node, [get_tx_anchor/0, get_tx_anchor/1]).
--import(ar_test_node, [get_tx_confirmations/2]).
--import(ar_test_node, [disconnect_from_slave/0, read_block_when_stored/1]).
+-import(ar_test_node, [
+	start/1, slave_start/1, connect_to_slave/0,
+	slave_mine/0, join_on_slave/0,
+	assert_wait_until_receives_txs/1,
+	wait_until_height/1, assert_slave_wait_until_height/1,
+	slave_call/3, assert_wait_until_block_block_index/1,
+	post_tx_to_slave/1, post_tx_to_master/1,
+	assert_post_tx_to_slave/1, assert_post_tx_to_master/1,
+	sign_tx/2, sign_tx/3, sign_v1_tx/1, sign_v1_tx/2,
+	sign_v1_tx/3,
+	get_tx_anchor/0, get_tx_anchor/1,
+	get_tx_confirmations/2,
+	disconnect_from_slave/0, read_block_when_stored/1,
+	random_v1_data/1
+]).
 
 accepts_gossips_and_mines_test_() ->
 	PrepareTestFor = fun(BuildTXSetFun) ->
@@ -833,19 +837,11 @@ recovers_from_forks(ForkHeight) ->
 		end,
 		PreForkTXs ++ SlavePostForkTXs ++ [TX2]
 	),
-	%% Assert the transactions included in the abandoned fork are removed.
+	%% Assert the block anchored transactions from the abandoned fork are
+	%% back in the memory pool.
 	lists:foreach(
 		fun(TX) ->
-			Confirmations = get_tx_confirmations(master, TX#tx.id),
-			?assertEqual(-1, Confirmations)
-		end,
-		MasterPostForkTXs
-	),
-	%% Assert the block anchored transactions from the abandoned fork can
-	%% be reposted.
-	lists:foreach(
-		fun(TX) ->
-			{ok, {{<<"200">>, _}, _, <<"OK">>, _, _}} =
+			{ok, {{<<"400">>, _}, _, <<"Transaction is already in the mempool.">>, _, _}} =
 				ar_http:req(#{
 					method => post,
 					peer => {127, 0, 0, 1, 1984},
@@ -911,15 +907,18 @@ grouped_txs() ->
 	[B0] = ar_weave:init(Wallets),
 	Chunk1 = random_v1_data(?TX_DATA_SIZE_LIMIT),
 	Chunk2 = <<"a">>,
+	Rate = ?INITIAL_USD_TO_AR_PRE_FORK_2_5,
+	Size1 = ar_tx:get_weave_size_increase(byte_size(Chunk1), 1),
 	TX1 =
 		sign_v1_tx(Key1, #{
-			reward => ar_tx:get_tx_fee(byte_size(Chunk1), B0#block.diff, 0, B0#block.timestamp),
+			reward => ar_tx:get_tx_fee(Size1, Rate, 0, B0#block.timestamp),
 			data => Chunk1,
 			last_tx => <<>>
 		}),
+	Size2 = ar_tx:get_weave_size_increase(byte_size(Chunk2), 2),
 	TX2 =
 		sign_v1_tx(Key2, #{
-			reward => ar_tx:get_tx_fee(byte_size(Chunk2), B0#block.diff, 0, B0#block.timestamp),
+			reward => ar_tx:get_tx_fee(Size2, Rate, 0, B0#block.timestamp),
 			data => Chunk2,
 			last_tx => B0#block.indep_hash
 		}),
@@ -957,7 +956,3 @@ assert_block_txs(TXs, BI) ->
 
 random_nonce() ->
 	integer_to_binary(rand:uniform(1000000)).
-
-random_v1_data(Size) ->
-	%% Make sure v1 txs do not end with a digit, otherwise they are malleable.
-	<< (crypto:strong_rand_bytes(Size - 1))/binary, <<"a">>/binary >>.

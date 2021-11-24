@@ -118,9 +118,6 @@ init(_) ->
 	ets:insert(?MODULE,
 		{disk_pool_data_root_expiration_time_us,
 			Config#config.disk_pool_data_root_expiration_time * 1000000}),
-	ets:insert(?MODULE, {max_disk_pool_buffer_mb, Config#config.max_disk_pool_buffer_mb}),
-	ets:insert(?MODULE,
-		{max_disk_pool_data_root_buffer_mb, Config#config.max_disk_pool_data_root_buffer_mb}),
 	ets:insert(?MODULE,
 		{randomx_bulk_hashing_iterations, Config#config.randomx_bulk_hashing_iterations}),
 	%% Store enabled features.
@@ -136,10 +133,6 @@ init(_) ->
 		end,
 		Config#config.disable
 	),
-	%% Prepare the storage for operation.
-	spawn(fun() -> ar_storage:init() end),
-	%% Optionally clear the block cache.
-	if Config#config.clean -> ar_storage:clear(); true -> do_nothing end,
 	{ok, #{}}.
 
 handle_call(reset, _From, State) ->

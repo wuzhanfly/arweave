@@ -1,23 +1,30 @@
 -module(ar_storage).
 
+-behaviour(gen_server).
+
 -export([
-	init/0,
-	write_block/1, write_full_block/1, write_full_block/2,
+	start_link/0,
+	write_full_block/2,
 	read_block/1, read_block/2,
-	invalidate_block/1, blocks_on_disk/0,
-	write_tx/1, write_tx_data/1, write_tx_data/2, write_tx_data/3, read_tx/1, read_tx_data/1,
-	read_wallet_list/1, write_wallet_list/4, write_wallet_list/2, write_wallet_list_chunk/4,
+	write_tx/1, write_tx_data/1, write_tx_data/2, write_tx_data/3,
+	read_tx/1, read_tx_data/1,
+	update_confirmation_index/1,
+	get_tx_confirmation_data/1,
+	get_wallet_list_range/2,
+	read_wallet_list/1, write_wallet_list/4, write_wallet_list/2, write_wallet_list_chunk/3,
 	write_block_index/1, read_block_index/0,
-	delete_full_block/1, delete_tx/1, delete_block/1,
+	delete_blacklisted_tx/1, delete_block/1,
 	get_free_space/1,
 	lookup_block_filename/1, lookup_tx_filename/1, wallet_list_filepath/1,
 	tx_filepath/1, tx_data_filepath/1,
 	read_tx_file/1, read_migrated_v1_tx_file/1,
-	ensure_directories/1, clear/0,
+	ensure_directories/1,
 	write_file_atomic/2,
 	has_chunk/1, write_chunk/3, read_chunk/1, delete_chunk/1,
 	write_term/2, write_term/3, read_term/1, read_term/2, delete_term/1
 ]).
+
+-export([init/1, handle_cast/2, handle_call/3, handle_info/2, terminate/2]).
 
 -include_lib("arweave/include/ar.hrl").
 -include_lib("arweave/include/ar_config.hrl").
@@ -25,118 +32,21 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("kernel/include/file.hrl").
 
+-record(state, {
+	tx_confirmation_db
+}).
 
-%%% Reads and writes blocks from disk.
+%%%===================================================================
+%%% Public interface.
+%%%===================================================================
 
-%% @doc Ready the system for block/tx reading and writing.
-init() ->
-	{ok, Config} = application:get_env(arweave, config),
-	ensure_directories(Config#config.data_dir),
-	ok = migrate_block_filenames(),
-	count_blocks_on_disk(),
-	ok.
+start_link() ->
+	gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-migrate_block_filenames() ->
-	case v1_migration_file_exists() of
-		true ->
-			ok;
-		false ->
-			{ok, Config} = application:get_env(arweave, config),
-			DataDir = Config#config.data_dir,
-			BlockDir = filename:join(DataDir, ?BLOCK_DIR),
-			{ok, Filenames} = file:list_dir(BlockDir),
-			lists:foreach(
-				fun(Filename) ->
-					case string:split(Filename, ".json") of
-						[Height_Hash, []] ->
-							case string:split(Height_Hash, "_") of
-								[_, H] when length(H) == 64 ->
-									rename_block_file(BlockDir, Filename, H ++ ".json");
-								_ ->
-									noop
-							end;
-						_ ->
-							noop
-					end
-				end,
-				Filenames
-			),
-			complete_v1_migration()
-	end.
+%%%===================================================================
+%%% Public interface.
+%%%===================================================================
 
-v1_migration_file_exists() ->
-	filelib:is_file(v1_migration_file()).
-
-v1_migration_file() ->
-	{ok, Config} = application:get_env(arweave, config),
-	DataDir = Config#config.data_dir,
-	filename:join([DataDir, ?STORAGE_MIGRATIONS_DIR, "v1"]).
-
-rename_block_file(BlockDir, Source, Dest) ->
-	file:rename(filename:join(BlockDir, Source), filename:join(BlockDir, Dest)).
-
-complete_v1_migration() ->
-	write_file_atomic(v1_migration_file(), <<>>).
-
-count_blocks_on_disk() ->
-	spawn(
-		fun() ->
-			{ok, Config} = application:get_env(arweave, config),
-			DataDir = Config#config.data_dir,
-			case file:list_dir(filename:join(DataDir, ?BLOCK_DIR)) of
-				{ok, List} ->
-					ar_meta_db:put(blocks_on_disk, length(List) - 1); %% - the "invalid" folder
-				{error, Reason} ->
-					?LOG_WARNING([
-						{event, failed_to_count_blocks_on_disk},
-						{reason, Reason}
-					]),
-					error
-			end
-		end
-	).
-
-%% @doc Ensure that all of the relevant storage directories exist.
-ensure_directories(DataDir) ->
-	%% Append "/" to every path so that filelib:ensure_dir/1 creates a directory if it does not exist.
-	filelib:ensure_dir(filename:join(DataDir, ?TX_DIR) ++ "/"),
-	filelib:ensure_dir(filename:join(DataDir, ?BLOCK_DIR) ++ "/"),
-	filelib:ensure_dir(filename:join(DataDir, ?WALLET_LIST_DIR) ++ "/"),
-	filelib:ensure_dir(filename:join(DataDir, ?HASH_LIST_DIR) ++ "/"),
-	filelib:ensure_dir(filename:join(DataDir, ?STORAGE_MIGRATIONS_DIR) ++ "/"),
-	filelib:ensure_dir(filename:join([DataDir, ?TX_DIR, "migrated_v1"]) ++ "/").
-
-%% @doc Clear the cache of saved blocks.
-clear() ->
-	{ok, Config} = application:get_env(arweave, config),
-	DataDir = Config#config.data_dir,
-	lists:map(
-		fun file:delete/1,
-		filelib:wildcard(filename:join([DataDir, ?BLOCK_DIR, "*.json"]))
-	),
-	ar_meta_db:put(blocks_on_disk, 0).
-
-%% @doc Returns the number of blocks stored on disk.
-blocks_on_disk() ->
-	ar_meta_db:get(blocks_on_disk).
-
-%% @doc Move a block into the 'invalid' block directory.
-invalidate_block(B) ->
-	ar_meta_db:increase(blocks_on_disk, -1),
-	TargetFile = invalid_block_filepath(B),
-	filelib:ensure_dir(TargetFile),
-	file:rename(block_filepath(B), TargetFile).
-
-write_block(Blocks) when is_list(Blocks) ->
-	lists:foldl(
-		fun (B, ok) ->
-				write_block(B);
-			(_B, Acc) ->
-				Acc
-		end,
-		ok,
-		Blocks
-	);
 write_block(B) ->
 	case ar_meta_db:get(disk_logging) of
 		true ->
@@ -162,29 +72,69 @@ write_block(B) ->
 			end
 	end.
 
-write_full_block(B) ->
-	BShadow = B#block{ txs = [T#tx.id || T <- B#block.txs] },
-	write_full_block(BShadow, B#block.txs).
-
+write_full_block(#block{ height = 0 } = BShadow, TXs) when ?NETWORK_NAME == "arweave.N.1" ->
+	%% Genesis transactions are stored in data/genesis_txs; they are part of the repository.
+	write_full_block2(BShadow, TXs);
 write_full_block(BShadow, TXs) ->
-	case write_tx(TXs) of
-		Response when Response == ok orelse Response == {error, firewall_check} ->
-			case write_block(BShadow) of
+	case write_tx([TX || TX <- TXs, not is_blacklisted(TX)]) of
+		ok ->
+			write_full_block2(BShadow, TXs);
+		Error ->
+			Error
+	end.
+
+is_blacklisted(#tx{ format = 2 }) ->
+	false;
+is_blacklisted(#tx{ id = TXID }) ->
+	ar_tx_blacklist:is_tx_blacklisted(TXID).
+
+write_full_block2(BShadow, TXs) ->
+	case write_block(BShadow) of
+		ok ->
+			case update_confirmation_index(BShadow#block{ txs = TXs }) of
 				ok ->
-					StoreTags = case ar_meta_db:get(arql_tags_index) of
-						true ->
-							store_tags;
-						_ ->
-							do_not_store_tags
-					end,
-					ar_arql_db:insert_full_block(BShadow#block{ txs = TXs }, StoreTags),
 					app_ipfs:maybe_ipfs_add_txs(TXs),
 					ok;
 				Error ->
 					Error
 			end;
-		Error ->
-			Error
+		Error2 ->
+			Error2
+	end.
+
+update_confirmation_index(B) ->
+	{ok, Config} = application:get_env(arweave, config),
+	case lists:member(arql_tags_index, Config#config.enable) of
+		true ->
+			ar_arql_db:insert_full_block(B, store_tags);
+		false ->
+			case catch gen_server:call(?MODULE, {put_tx_confirmation_data, B}) of
+				{'EXIT', {timeout, {gen_server, call, _}}} ->
+					{error, timeout};
+				Reply ->
+					Reply
+			end
+	end.
+
+%% @doc Return {BlockHeight, BlockHash} belonging to the block where
+%% the given transaction was included.
+get_tx_confirmation_data(TXID) ->
+	[{_, TXConfirmationDB}] = ets:lookup(?MODULE, tx_confirmation_db),
+	case ar_kv:get(TXConfirmationDB, TXID) of
+		{ok, Binary} ->
+			{ok, binary_to_term(Binary)};
+		not_found ->
+			case catch ar_arql_db:select_block_by_tx_id(ar_util:encode(TXID)) of
+				{ok, #{
+					height := Height,
+					indep_hash := EncodedIndepHash
+				}} ->
+					{ok, {Height, ar_util:decode(EncodedIndepHash)}};
+				not_found ->
+					not_found;
+				{'EXIT', {timeout, {gen_server, call, [ar_arql_db, _]}}} ->
+					{error, timeout}
+			end
 	end.
 
 %% @doc Read a block from disk, given a height
@@ -212,15 +162,28 @@ read_block(Blocks) when is_list(Blocks) ->
 read_block({H, _, _}) ->
 	read_block(H);
 read_block(BH) ->
-	case lookup_block_filename(BH) of
+	Filename =
+		%% The cache keeps a rotated number of recent headers when the
+		%% node is out of disk space.
+		case ar_disk_cache:lookup_block_filename(BH) of
+			unavailable ->
+				case lookup_block_filename(BH) of
+					unavailable ->
+						unavailable;
+					Name ->
+						Name
+				end;
+			{ok, DiskCacheName} ->
+				DiskCacheName
+		end,
+	case Filename of
 		unavailable ->
 			unavailable;
-		Filename ->
+		_ ->
 			case file:read_file(Filename) of
 				{ok, JSON} ->
 					case parse_block_shadow_json(JSON) of
 						{error, _} ->
-							invalidate_block(BH),
 							unavailable;
 						{ok, B} ->
 							B
@@ -229,6 +192,17 @@ read_block(BH) ->
 					unavailable
 			end
 	end.
+
+%% @doc Ensure that all of the relevant storage directories exist.
+ensure_directories(DataDir) ->
+	%% Append "/" to every path so that filelib:ensure_dir/1 creates a directory
+	%% if it does not exist.
+	filelib:ensure_dir(filename:join(DataDir, ?TX_DIR) ++ "/"),
+	filelib:ensure_dir(filename:join(DataDir, ?BLOCK_DIR) ++ "/"),
+	filelib:ensure_dir(filename:join(DataDir, ?WALLET_LIST_DIR) ++ "/"),
+	filelib:ensure_dir(filename:join(DataDir, ?HASH_LIST_DIR) ++ "/"),
+	filelib:ensure_dir(filename:join(DataDir, ?STORAGE_MIGRATIONS_DIR) ++ "/"),
+	filelib:ensure_dir(filename:join([DataDir, ?TX_DIR, "migrated_v1"]) ++ "/").
 
 parse_block_shadow_json(JSON) ->
 	case ar_serialize:json_decode(JSON) of
@@ -267,51 +241,6 @@ lookup_block_filename(H) ->
 			Name;
 		false ->
 			unavailable
-	end.
-
-%% @doc Remove the block header, its transaction headers, and its wallet list.
-%% Return {ok, BytesRemoved} if everything was removed successfully or either
-%% of the files has been already removed.
-delete_full_block(H) ->
-	case read_block(H) of
-		unavailable ->
-			{ok, 0};
-		B ->
-			DeleteTXsResult =
-				lists:foldl(
-					fun (TXID, {ok, Bytes}) ->
-							case delete_tx(TXID) of
-								{ok, BytesRemoved} ->
-									{ok, Bytes + BytesRemoved};
-								Error ->
-									Error
-							end;
-						(_TXID, Acc) ->
-							Acc
-					end,
-					{ok, 0},
-					B#block.txs
-				),
-			case DeleteTXsResult of
-				{ok, TXBytesRemoved} ->
-					case delete_wallet_list(B#block.wallet_list) of
-						{ok, WalletListBytesRemoved} ->
-							case delete_block(H) of
-								{ok, BlockBytesRemoved} ->
-									BytesRemoved =
-										TXBytesRemoved +
-										WalletListBytesRemoved +
-										BlockBytesRemoved,
-									{ok, BytesRemoved};
-								Error ->
-									Error
-							end;
-						Error ->
-							Error
-					end;
-				Error ->
-					Error
-			end
 	end.
 
 delete_wallet_list(RootHash) ->
@@ -356,29 +285,29 @@ delete_wallet_list_chunks(Position, RootHash, BytesRemoved) ->
 			{ok, BytesRemoved}
 	end.
 
-%% @doc Delete the tx with the given hash from disk. Return {ok, BytesRemoved} if
+%% @doc Delete the blacklisted tx with the given hash from disk. Return {ok, BytesRemoved} if
 %% the removal is successful or the file does not exist. The reported number of removed
 %% bytes does not include the migrated v1 data. The removal of migrated v1 data is requested
-%% from ar_data_sync asynchronously.
-delete_tx(Hash) ->
+%% from ar_data_sync asynchronously. The v2 headers are not removed.
+delete_blacklisted_tx(Hash) ->
 	case lookup_tx_filename(Hash) of
 		{Status, Filename} ->
 			case Status of
 				migrated_v1 ->
-					ar_data_sync:request_tx_data_removal(Hash);
-				_ ->
-					ok
-			end,
-			case file:read_file_info(Filename) of
-				{ok, FileInfo} ->
-					case file:delete(Filename) of
-						ok ->
-							{ok, FileInfo#file_info.size};
+					ar_data_sync:request_tx_data_removal(Hash),
+					case file:read_file_info(Filename) of
+						{ok, FileInfo} ->
+							case file:delete(Filename) of
+								ok ->
+									{ok, FileInfo#file_info.size};
+								Error ->
+									Error
+							end;
 						Error ->
 							Error
 					end;
-				Error ->
-					Error
+				_ ->
+					{ok, 0}
 			end;
 		unavailable ->
 			{ok, 0}
@@ -408,8 +337,6 @@ write_tx(TXs) when is_list(TXs) ->
 	lists:foldl(
 		fun (TX, ok) ->
 				write_tx(TX);
-			(TX, {error, firewall_check}) ->
-				write_tx(TX);
 			(_TX, Acc) ->
 				Acc
 		end,
@@ -433,25 +360,32 @@ write_tx(#tx{ format = Format } = TX) ->
 						{true, 1} ->
 							%% v1 data is considered to be a part of the header therefore
 							%% if we fail to store it, we return an error here.
+							%% We have already checked whether the transaction is blacklisted
+							%% prior to calling this function, see is_blacklisted/1.
 							write_tx_data(
 								no_expected_data_root,
 								TX#tx.data,
 								write_to_free_space_buffer
 							);
 						{true, 2} ->
-							case write_tx_data(TX#tx.data_root, TX#tx.data) of
-								ok ->
+							case ar_tx_blacklist:is_tx_blacklisted(TX#tx.id) of
+								true ->
 									ok;
-								{error, Reason} ->
-									%% v2 data is not part of the header. We have to
-									%% report success here even if we failed to store
-									%% the attached data.
-									?LOG_WARNING([
-										{event, failed_to_store_tx_data},
-										{reason, Reason},
-										{tx, ar_util:encode(TX#tx.id)}
-									]),
-									ok
+								false ->
+									case write_tx_data(TX#tx.data_root, TX#tx.data) of
+										ok ->
+											ok;
+										{error, Reason} ->
+											%% v2 data is not part of the header. We have to
+											%% report success here even if we failed to store
+											%% the attached data.
+											?LOG_WARNING([
+												{event, failed_to_store_tx_data},
+												{reason, Reason},
+												{tx, ar_util:encode(TX#tx.id)}
+											]),
+											ok
+									end
 							end
 					end;
 				false ->
@@ -547,7 +481,16 @@ read_tx(TX) when is_record(TX, tx) -> TX;
 read_tx(TXs) when is_list(TXs) ->
 	lists:map(fun read_tx/1, TXs);
 read_tx(ID) ->
-	case lookup_tx_filename(ID) of
+	MaybeFilename =
+		%% The cache keeps a rotated number of recent headers when the
+		%% node is out of disk space.
+		case ar_disk_cache:lookup_tx_filename(ID) of
+			unavailable ->
+				lookup_tx_filename(ID);
+			Name ->
+				Name
+		end,
+	case MaybeFilename of
 		{ok, Filename} ->
 			case read_tx_file(Filename) of
 				{ok, TX} ->
@@ -636,40 +579,24 @@ write_wallet_list(RootHash, Tree) ->
 	write_wallet_list_chunks(RootHash, Tree, first, 0).
 
 write_wallet_list_chunks(RootHash, Tree, Cursor, Position) ->
-	case write_wallet_list_chunk(RootHash, Tree, Cursor, Position) of
-		{ok, complete} ->
+	{NextCursor, Range} = get_wallet_list_range(Tree, Cursor),
+	StoredRange = case NextCursor of last -> [last | Range]; _ -> Range end,
+	case {write_wallet_list_chunk(RootHash, StoredRange, Position), NextCursor} of
+		{ok, last} ->
 			ok;
-		{ok, NextCursor, NextPosition} ->
+		{ok, _} ->
+			NextPosition = Position + ?WALLET_LIST_CHUNK_SIZE,
 			write_wallet_list_chunks(RootHash, Tree, NextCursor, NextPosition);
-		{error, _Reason} = Error ->
+		{{error, _Reason} = Error, _} ->
 			Error
 	end.
 
-write_wallet_list_chunk(RootHash, Tree, Cursor, Position) ->
+write_wallet_list_chunk(RootHash, Range, Position) ->
 	{ok, Config} = application:get_env(arweave, config),
-	Range =
-		case Cursor of
-			first ->
-				ar_patricia_tree:get_range(?WALLET_LIST_CHUNK_SIZE + 1, Tree);
-			_ ->
-				ar_patricia_tree:get_range(Cursor, ?WALLET_LIST_CHUNK_SIZE + 1, Tree)
-		end,
-	{NextCursor, NextPosition, Range2} =
-		case length(Range) of
-			?WALLET_LIST_CHUNK_SIZE + 1 ->
-				{element(1, hd(Range)), Position + ?WALLET_LIST_CHUNK_SIZE, tl(Range)};
-			_ ->
-				{last, none, [last | Range]}
-		end,
 	Name = wallet_list_chunk_relative_filepath(Position, RootHash),
-	case write_term(Config#config.data_dir, Name, Range2, do_not_override) of
+	case write_term(Config#config.data_dir, Name, Range, do_not_override) of
 		ok ->
-			case NextCursor of
-				last ->
-					{ok, complete};
-				_ ->
-					{ok, NextCursor, NextPosition}
-			end;
+			ok;
 		{error, Reason} = Error ->
 			?LOG_ERROR([
 				{event, failed_to_write_wallet_list_chunk},
@@ -705,16 +632,33 @@ read_block_index() ->
 			Error
 	end.
 
+get_wallet_list_range(Tree, Cursor) ->
+	Range =
+		case Cursor of
+			first ->
+				ar_patricia_tree:get_range(?WALLET_LIST_CHUNK_SIZE + 1, Tree);
+			_ ->
+				ar_patricia_tree:get_range(Cursor, ?WALLET_LIST_CHUNK_SIZE + 1, Tree)
+		end,
+	case length(Range) of
+		?WALLET_LIST_CHUNK_SIZE + 1 ->
+			{element(1, hd(Range)), tl(Range)};
+		_ ->
+			{last, Range}
+	end.
+
 %% @doc Read a given wallet list (by hash) from the disk.
 read_wallet_list(WalletListHash) when is_binary(WalletListHash) ->
-	case read_wallet_chunk(WalletListHash) of
+	case read_wallet_list_chunk(WalletListHash) of
 		not_found ->
 			Filename = wallet_list_filepath(WalletListHash),
 			case file:read_file(Filename) of
 				{ok, JSON} ->
 					parse_wallet_list_json(JSON);
-				{error, Reason} ->
-					{error, {failed_reading_file, Filename, Reason}}
+				{error, enoent} ->
+					not_found;
+				Error ->
+					Error
 			end;
 		{ok, Tree} ->
 			{ok, Tree};
@@ -724,28 +668,36 @@ read_wallet_list(WalletListHash) when is_binary(WalletListHash) ->
 read_wallet_list(WL) when is_list(WL) ->
 	{ok, ar_patricia_tree:from_proplist([{A, {B, LTX}} || {A, B, LTX} <- WL])}.
 
-read_wallet_chunk(RootHash) ->
-	read_wallet_chunk(RootHash, 0, ar_patricia_tree:new()).
+read_wallet_list_chunk(RootHash) ->
+	read_wallet_list_chunk(RootHash, 0, ar_patricia_tree:new()).
 
-read_wallet_chunk(RootHash, Cursor, Tree) ->
-	{ok, Config} = application:get_env(arweave, config),
-	Name = binary_to_list(iolist_to_binary([
-		?WALLET_LIST_DIR,
-		"/",
-		ar_util:encode(RootHash),
-		"-",
-		integer_to_binary(Cursor),
-		"-",
-		integer_to_binary(?WALLET_LIST_CHUNK_SIZE)
-	])),
-	case read_term(Config#config.data_dir, Name) of
+read_wallet_list_chunk(RootHash, Position, Tree) ->
+	Filename =
+		case ar_disk_cache:lookup_wallet_list_chunk_filename(RootHash, Position) of
+			{ok, Name} ->
+				Name;
+			_ ->
+				{ok, Config} = application:get_env(arweave, config),
+				binary_to_list(iolist_to_binary([
+					Config#config.data_dir,
+					"/",
+					?WALLET_LIST_DIR,
+					"/",
+					ar_util:encode(RootHash),
+					"-",
+					integer_to_binary(Position),
+					"-",
+					integer_to_binary(?WALLET_LIST_CHUNK_SIZE)
+				]))
+		end,
+	case read_term(".", Filename) of
 		{ok, Chunk} ->
-			{NextCursor, Wallets} =
+			{NextPosition, Wallets} =
 				case Chunk of
 					[last | Tail] ->
 						{last, Tail};
 					_ ->
-						{Cursor + ?WALLET_LIST_CHUNK_SIZE, Chunk}
+						{Position + ?WALLET_LIST_CHUNK_SIZE, Chunk}
 				end,
 			Tree2 =
 				lists:foldl(
@@ -753,15 +705,15 @@ read_wallet_chunk(RootHash, Cursor, Tree) ->
 					Tree,
 					Wallets
 				),
-			case NextCursor of
+			case NextPosition of
 				last ->
 					{ok, Tree2};
 				_ ->
-					read_wallet_chunk(RootHash, NextCursor, Tree2)
+					read_wallet_list_chunk(RootHash, NextPosition, Tree2)
 			end;
 		{error, Reason} = Error ->
 			?LOG_ERROR([
-				{event, failed_to_read_wallet_chunk},
+				{event, failed_to_read_wallet_list_chunk},
 				{reason, Reason}
 			]),
 			Error;
@@ -791,6 +743,50 @@ lookup_tx_filename(ID) ->
 					unavailable
 			end
 	end.
+
+%%%===================================================================
+%%% Generic server callbacks.
+%%%===================================================================
+
+init([]) ->
+	{ok, Config} = application:get_env(arweave, config),
+	ensure_directories(Config#config.data_dir),
+	{ok, DB} = ar_kv:open_without_column_families("ar_storage_tx_confirmation_db", []),
+	ets:insert(?MODULE, {tx_confirmation_db, DB}),
+	{ok, #state{ tx_confirmation_db = DB }}.
+
+handle_call({put_tx_confirmation_data, B}, _From, State) ->
+	#state{ tx_confirmation_db = TXConfirmationDB } = State,
+	Data = term_to_binary({B#block.height, B#block.indep_hash}),
+	{reply, lists:foldl(
+		fun	(TX, ok) ->
+				ar_kv:put(TXConfirmationDB, TX#tx.id, Data);
+			(_TX, Acc) ->
+				Acc
+		end,
+		ok,
+		B#block.txs
+	), State};
+
+handle_call(Request, _From, State) ->
+	?LOG_WARNING("event: unhandled_call, request: ~p", [Request]),
+	{reply, ok, State}.
+
+handle_cast(Cast, State) ->
+	?LOG_WARNING("event: unhandled_cast, cast: ~p", [Cast]),
+	{noreply, State}.
+
+handle_info(Message, State) ->
+	?LOG_WARNING("event: unhandled_info, message: ~p", [Message]),
+	{noreply, State}.
+
+terminate(_Reason, #state{ tx_confirmation_db = DB }) ->
+	ar_kv:close(DB),
+	ok.
+
+%%%===================================================================
+%%% Private functions.
+%%%===================================================================
 
 get_disk_data(Dir) ->
 	[DiskData | _] = select_drive(ar_disksup:get_disk_data(), filename:absname(Dir)),
@@ -851,9 +847,6 @@ block_filename(BH) when is_binary(BH) ->
 
 block_filepath(B) ->
 	filepath([?BLOCK_DIR, block_filename(B)]).
-
-invalid_block_filepath(B) ->
-	filepath([?BLOCK_DIR, "invalid", block_filename(B)]).
 
 tx_filepath(TX) ->
 	filepath([?TX_DIR, tx_filename(TX)]).
@@ -1000,8 +993,6 @@ store_and_retrieve_block_test_() ->
 	{timeout, 20, fun test_store_and_retrieve_block/0}.
 
 test_store_and_retrieve_block() ->
-	ar_storage:clear(),
-	?assertEqual(0, blocks_on_disk()),
 	BI0 = [B0] = ar_weave:init([]),
 	ar_test_node:start(B0),
 	?assertEqual(
@@ -1017,9 +1008,10 @@ test_store_and_retrieve_block() ->
 	ar_test_node:wait_until_height(1),
 	ar_node:mine(),
 	BI1 = ar_test_node:wait_until_height(2),
+	[{_, BlockCount}] = ets:lookup(ar_header_sync, synced_blocks),
 	ar_util:do_until(
 		fun() ->
-			3 == blocks_on_disk()
+			3 == BlockCount
 		end,
 		100,
 		2000
@@ -1027,25 +1019,6 @@ test_store_and_retrieve_block() ->
 	BH1 = element(1, hd(BI1)),
 	?assertMatch(#block{ height = 2, indep_hash = BH1 }, read_block(BH1)),
 	?assertMatch(#block{ height = 2, indep_hash = BH1 }, read_block(2, BI1)).
-
-%% @doc Ensure blocks can be written to disk, then moved into the 'invalid'
-%% block directory.
-invalidate_block_test() ->
-	[B] = ar_weave:init(),
-	write_full_block(B),
-	invalidate_block(B),
-	unavailable = read_block(B#block.indep_hash, ar_weave:generate_block_index([B])),
-	{ok, Config} = application:get_env(arweave, config),
-	DataDir = Config#config.data_dir,
-	TargetFile = filename:join([
-		DataDir,
-		?BLOCK_DIR,
-		"invalid",
-		binary_to_list(ar_util:encode(B#block.indep_hash)) ++ ".json"
-	]),
-	{ok, Binary} = file:read_file(TargetFile),
-	{ok, JSON} = ar_serialize:json_decode(Binary),
-	?assertEqual(B#block.indep_hash, (ar_serialize:json_struct_to_block(JSON))#block.indep_hash).
 
 store_and_retrieve_block_block_index_test() ->
 	RandomEntry =
@@ -1093,7 +1066,7 @@ read_wallet_list_chunks_test() ->
 			?assertEqual(true, filelib:is_file(wallet_list_chunk_filepath(0, RootHash))),
 			?assertMatch({ok, _}, delete_wallet_list(RootHash)),
 			?assertEqual({ok, 0}, delete_wallet_list(RootHash)),
-			?assertMatch({error, {failed_reading_file, _, enoent}}, read_wallet_list(RootHash)),
+			?assertEqual(not_found, read_wallet_list(RootHash)),
 			?assertEqual(false, filelib:is_file(wallet_list_chunk_filepath(0, RootHash))),
 			%% Not chunked write - wallets before the fork 2.2.
 			ok = write_wallet_list(RootHash, unclaimed, false, Tree),
@@ -1104,15 +1077,10 @@ read_wallet_list_chunks_test() ->
 			?assertMatch({ok, _}, delete_wallet_list(RootHash)),
 			?assertEqual({ok, 0}, delete_wallet_list(RootHash)),
 			?assertEqual(false, filelib:is_file(wallet_list_filepath(RootHash))),
-			?assertMatch({error, {failed_reading_file, _, enoent}}, read_wallet_list(RootHash))
+			?assertEqual(not_found, read_wallet_list(RootHash))
 		end,
 		TestCases
 	).
 
 random_wallet() ->
 	{crypto:strong_rand_bytes(32), {rand:uniform(1000000000), crypto:strong_rand_bytes(32)}}.
-
-handle_corrupted_wallet_list_test() ->
-	H = crypto:strong_rand_bytes(32),
-	ok = file:write_file(wallet_list_filepath(H), <<>>),
-	?assertMatch({error, _}, read_wallet_list(H)).

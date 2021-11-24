@@ -3,16 +3,22 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/0, stop/0]).
--export([set_max_emitters/1, set_max_header_size/1, set_max_data_size/1, set_pause/1]).
--export([add_tx/1, show_queue/0]).
--export([utility/1]).
--export([drop_tx/1]).
+-export([
+	start_link/0, stop/0,
+	set_max_header_size/1, set_max_data_size/1, set_pause/1,
+	show_queue/0,
+	utility/1,
+	debug_status/0
+]).
 
 %% gen_server callbacks
 -export([
-	init/1, handle_call/3, handle_cast/2,
-	terminate/2, code_change/3, format_status/2
+	init/1,
+	handle_call/3,
+	handle_cast/2,
+	handle_info/2,
+	terminate/2,
+	code_change/3
 ]).
 
 -include_lib("arweave/include/ar.hrl").
@@ -27,34 +33,29 @@
 	header_size,
 	data_size,
 	paused,
-	emit_map
+	emit_map,
+	timestamp_map
 }).
 
 -define(EMITTER_START_WAIT, 150).
 -define(EMITTER_INTER_WAIT, 5).
+
+%% Prioritize format=1 transactions with data size bigger than this
+%% value (in bytes) lower than every other transaction. The motivation
+%% is to encourage people uploading data to use the new v2 transaction
+%% format. Large v1 transactions may significantly slow down the rate
+%% of acceptance of transactions into the weave.
+-define(DEPRIORITIZE_V1_TX_SIZE_THRESHOLD, 100).
 
 %%%===================================================================
 %%% Public interface.
 %%%===================================================================
 
 start_link() ->
-	Resp =
-		case gen_server:start_link({local, ?MODULE}, ?MODULE, [], []) of
-			{ok, _Pid} ->
-				ok;
-			{error, {already_started, _Pid}} ->
-				ok;
-			Error ->
-				?LOG_ERROR({?MODULE, error_on_start_link, Error}),
-				error
-		end,
-	case Resp of
-		ok -> start_emitters();
-		_  -> pass
-	end.
+	gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 start_emitters() ->
-	gen_server:call(?MODULE, start_emitters).
+	gen_server:cast(?MODULE, start_emitters).
 
 stop() ->
 	gen_server:stop(?MODULE).
@@ -68,45 +69,62 @@ set_max_header_size(Bytes) ->
 set_max_data_size(Bytes) ->
 	gen_server:call(?MODULE, {set_max_data_size, Bytes}).
 
-set_max_emitters(N) ->
-	gen_server:call(?MODULE, {set_max_emitters, N}).
-
-add_tx(TX) ->
-	gen_server:cast(?MODULE, {add_tx, TX}).
-
 show_queue() ->
 	gen_server:call(?MODULE, show_queue).
-
-drop_tx(TX) ->
-	gen_server:cast(?MODULE, {drop_tx, TX}).
 
 %%%===================================================================
 %%% Generic server callbacks.
 %%%===================================================================
 
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Initializes the server
+%%
+%% @spec init(Args) -> {ok, State} |
+%%					   {ok, State, Timeout} |
+%%					   ignore |
+%%					   {stop, Reason}
+%% @end
+%%--------------------------------------------------------------------
 init([]) ->
 	MaxEmitters =
 		case ar_meta_db:get(max_emitters) of
 			not_found -> ?NUM_EMITTER_PROCESSES;
 			X -> X
 		end,
+	ok = ar_events:subscribe(tx),
+	start_emitters(),
+	ets:insert(?MODULE, [{added, 0}, {scheduled, 0}, {dropped, 0}, {emitters_failed, 0}]),
 	{ok, #state{
 		tx_queue = gb_sets:new(),
-		emitters_running = 0,
+		emitters_running = #{},
 		max_emitters = MaxEmitters,
 		max_header_size = ?TX_QUEUE_HEADER_SIZE_LIMIT,
 		max_data_size = ?TX_QUEUE_DATA_SIZE_LIMIT,
 		header_size = 0,
 		data_size = 0,
 		paused = false,
-		emit_map = #{}
+		emit_map = #{},
+		timestamp_map = #{}
 	}}.
 
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Handling call messages
+%%
+%% @spec handle_call(Request, From, State) ->
+%%									 {reply, Reply, State} |
+%%									 {reply, Reply, State, Timeout} |
+%%									 {noreply, State} |
+%%									 {noreply, State, Timeout} |
+%%									 {stop, Reason, Reply, State} |
+%%									 {stop, Reason, State}
+%% @end
+%%--------------------------------------------------------------------
 handle_call({set_pause, PauseOrNot}, _From, State) ->
 	{reply, ok, State#state{ paused = PauseOrNot }};
-
-handle_call({set_max_emitters, N}, _From, State) ->
-	{reply, ok, State#state{ max_emitters = N }};
 
 handle_call({set_max_header_size, Bytes}, _From, State) ->
 	{reply, ok, State#state{ max_header_size = Bytes }};
@@ -118,100 +136,41 @@ handle_call(show_queue, _From, State = #state{ tx_queue = Q }) ->
 	Reply = show_queue(Q),
 	{reply, Reply, State};
 
-handle_call(start_emitters, _From, State) ->
-	#state{ max_emitters = MaxEmitters, emitters_running = EmittersRunning } = State,
+handle_call(Request, _From, State) ->
+	?LOG_WARNING("event: unhandled_call, request: ~p", [Request]),
+	{reply, ok, State}.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Handling cast messages
+%%
+%% @spec handle_cast(Msg, State) -> {noreply, State} |
+%%									{noreply, State, Timeout} |
+%%									{stop, Reason, State}
+%% @end
+%%--------------------------------------------------------------------
+handle_cast(start_emitters, State) ->
+	#state{ max_emitters = MaxEmitters } = State,
 	lists:foreach(
 		fun(N) ->
 			Wait = N * ?EMITTER_START_WAIT,
 			timer:apply_after(Wait, gen_server, cast, [?MODULE, emitter_go])
 		end,
-		lists:seq(1, max(MaxEmitters - EmittersRunning, 0))
+		lists:seq(1, MaxEmitters)
 	),
-	{reply, ok, State#state{ emitters_running = MaxEmitters, paused = false }};
-
-handle_call(_Request, _From, State) ->
-	{noreply, State}.
-
-handle_cast({add_tx, TX}, State) ->
-	#state{
-		tx_queue = Q,
-		max_header_size = MaxHeaderSize,
-		max_data_size = MaxDataSize,
-		header_size = HeaderSize,
-		data_size = DataSize
-	} = State,
-	{TXHeaderSize, TXDataSize} = tx_queue_size(TX),
-	U = utility(TX),
-	{NewQ, {NewHeaderSize, NewDataSize}, DroppedTXs} =
-		maybe_drop(
-			gb_sets:add_element({U, {TX, {TXHeaderSize, TXDataSize}}}, Q),
-			{HeaderSize + TXHeaderSize, DataSize + TXDataSize},
-			{MaxHeaderSize, MaxDataSize}
-		),
-	case DroppedTXs of
-		[] ->
-			noop;
-		_ ->
-			DroppedIDs = lists:map(
-				fun(DroppedTX) ->
-					case TX#tx.format of
-						2 ->
-							ar_data_sync:maybe_drop_data_root_from_disk_pool(
-								DroppedTX#tx.data_root,
-								DroppedTX#tx.data_size,
-								DroppedTX#tx.id
-							);
-						_ ->
-							nothing_to_drop_from_disk_pool
-					end,
-					ar_util:encode(DroppedTX#tx.id)
-				end,
-				DroppedTXs
-			),
-			?LOG_INFO([
-				{event, drop_txs_from_queue},
-				{dropped_txs, DroppedIDs}
-			]),
-			ar_bridge:drop_waiting_txs(DroppedTXs)
-	end,
-	NewState = State#state{
-		tx_queue = NewQ,
-		header_size = NewHeaderSize,
-		data_size = NewDataSize
-	},
-	{noreply, NewState};
-
-handle_cast({drop_tx, TX}, State) ->
-	#state{
-		tx_queue = Q,
-		header_size = HeaderSize,
-		data_size = DataSize
-	} = State,
-	{TXHeaderSize, TXDataSize} = tx_queue_size(TX),
-	U = utility(TX),
-	Item = {U, {TX, {TXHeaderSize, TXDataSize}}},
-	case gb_sets:is_element(Item, Q) of
-		true ->
-			{noreply, State#state{
-				tx_queue = gb_sets:del_element(Item, Q),
-				header_size = HeaderSize - TXHeaderSize,
-				data_size = DataSize - TXDataSize
-			}};
-		false ->
-			{noreply, State}
-	end;
+	{noreply, State#state{ paused = false }};
 
 handle_cast(emitter_go, State = #state{ paused = true }) ->
 	timer:apply_after(?EMITTER_START_WAIT, gen_server, cast, [?MODULE, emitter_go]),
 	{noreply, State};
-handle_cast(emitter_go, State = #state{ emitters_running = EmittersRunning, max_emitters = MaxEmitters }) when EmittersRunning > MaxEmitters ->
-	{noreply, State#state { emitters_running = EmittersRunning - 1}};
 handle_cast(emitter_go, State) ->
 	#state{
 		tx_queue = Q,
 		header_size = HeaderSize,
 		data_size = DataSize,
-		emit_map = EmitMap
+		emit_map = EmitMap,
+		timestamp_map = TimestampMap
 	} = State,
 	NewState =
 		case gb_sets:is_empty(Q) of
@@ -219,6 +178,7 @@ handle_cast(emitter_go, State) ->
 				timer:apply_after(?EMITTER_START_WAIT, gen_server, cast, [?MODULE, emitter_go]),
 				State;
 			false ->
+				ets:update_counter(?MODULE, scheduled, 1),
 				{{_, {TX, {TXHeaderSize, TXDataSize}}}, NewQ} = gb_sets:take_largest(Q),
 				{Peers, TrustedPeers} = get_peers(),
 				case Peers of
@@ -227,7 +187,8 @@ handle_cast(emitter_go, State) ->
 						State#state{
 							tx_queue = NewQ,
 							header_size = HeaderSize - TXHeaderSize,
-							data_size = DataSize - TXDataSize
+							data_size = DataSize - TXDataSize,
+							timestamp_map = maps:remove(TX#tx.id, TimestampMap)
 						};
 					_ ->
 						%% Send transactions to the "max_propagation_peers" best peers,
@@ -251,31 +212,37 @@ handle_cast(emitter_go, State) ->
 							tx_queue = NewQ,
 							header_size = HeaderSize - TXHeaderSize,
 							data_size = DataSize - TXDataSize,
-							emit_map = NewEmitMap
+							emit_map = NewEmitMap,
+							timestamp_map = maps:remove(TX#tx.id, TimestampMap)
 						}
 				end
 		end,
 	{noreply, NewState};
 
-handle_cast({emit_tx_to_peer, TX}, State = #state{ emit_map = EmitMap }) ->
+handle_cast({emit_tx_to_peer, TX},
+		State = #state{ emit_map = EmitMap, emitters_running = EmittersRunning }) ->
 	#tx{ id = TXID } = TX,
 	case EmitMap of
 		#{ TXID := #{ peers := [] } } ->
 			{noreply, State};
 		#{ TXID := TXIDMap = #{ peers := [Peer | Peers], trusted_peers := TrustedPeers } } ->
-			spawn(
+			{_, Ref} = spawn_monitor(
 				fun() ->
 					PropagatedTX = tx_to_propagated_tx(TX, Peer, TrustedPeers),
 					Reply = ar_http_iface_client:send_new_tx(Peer, PropagatedTX),
 					gen_server:cast(?MODULE, {emitted_tx_to_peer, {Reply, TX}})
 				end
 			),
-			{noreply, State#state{ emit_map = EmitMap#{ TXID => TXIDMap#{ peers => Peers } } }};
+			{noreply, State#state{
+				emit_map = EmitMap#{ TXID => TXIDMap#{ peers => Peers } },
+				emitters_running = EmittersRunning#{ Ref => TX }
+			}};
 		_ ->
 			{noreply, State}
 	end;
 
-handle_cast({emitted_tx_to_peer, {Reply, TX}}, State = #state{ emit_map = EmitMap, tx_queue = Q }) ->
+handle_cast({emitted_tx_to_peer, {Reply, TX}},
+		State = #state{ emit_map = EmitMap, tx_queue = Q }) ->
 	TXID = TX#tx.id,
 	case EmitMap of
 		#{ TXID := #{ peers := [], started_at := StartedAt } } ->
@@ -291,51 +258,197 @@ handle_cast({emitted_tx_to_peer, {Reply, TX}}, State = #state{ emit_map = EmitMa
 	end;
 
 handle_cast({emitter_finished, TX}, State) ->
+	%% Send this TX to the mining pool with some delay depending on the TX size.
 	timer:apply_after(
 		ar_node_utils:calculate_delay(tx_propagated_size(TX)),
-		ar_bridge,
-		move_tx_to_mining_pool,
-		[TX]
+		ar_events,
+		send,
+		[tx, {ready_for_mining, TX}]
 	),
-	timer:apply_after(?EMITTER_INTER_WAIT, gen_server, cast, [?MODULE, emitter_go]),
+	gen_server:cast(?MODULE, emitter_go),
 	{noreply, State};
 
-handle_cast(_Request, State) ->
+handle_cast(Cast, State) ->
+	?LOG_WARNING("event: unhandled_cast, cast: ~p", [Cast]),
 	{noreply, State}.
 
-terminate(_Reason, _State) ->
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Handling all non call/cast messages
+%%
+%% @spec handle_info(Info, State) -> {noreply, State} |
+%%									 {noreply, State, Timeout} |
+%%									 {stop, Reason, State}
+%% @end
+%%--------------------------------------------------------------------
+handle_info({event, tx, {new, #tx{ id = TXID } = TX, _Source}}, State) ->
+	#state{
+		tx_queue = Q,
+		max_header_size = MaxHeaderSize,
+		max_data_size = MaxDataSize,
+		header_size = HeaderSize,
+		data_size = DataSize,
+		timestamp_map = TimestampMap
+	} = State,
+	{TXHeaderSize, TXDataSize} = tx_queue_size(TX),
+	Timestamp = maps:get(TXID, TimestampMap, -os:system_time(microsecond)),
+	U = {utility(TX), Timestamp},
+	Item = {U, {TX, {TXHeaderSize, TXDataSize}}},
+	case gb_sets:is_element(Item, Q) of
+		true ->
+			{noreply, State};
+		false ->
+			TXID = TX#tx.id,
+			ets:update_counter(?MODULE, added, 1),
+			{NewQ, {NewHeaderSize, NewDataSize}, DroppedTXs, TimestampMap2} =
+				maybe_drop(
+					gb_sets:add_element(Item, Q),
+					{HeaderSize + TXHeaderSize, DataSize + TXDataSize},
+					{MaxHeaderSize, MaxDataSize},
+					maps:put(TXID, Timestamp, TimestampMap)
+				),
+			case DroppedTXs of
+				[] ->
+					noop;
+				_ ->
+					DroppedIDs = lists:map(
+						fun(DroppedTX) ->
+							case TX#tx.format of
+								2 ->
+									ar_data_sync:maybe_drop_data_root_from_disk_pool(
+										DroppedTX#tx.data_root,
+										DroppedTX#tx.data_size,
+										DroppedTX#tx.id
+									);
+								_ ->
+									nothing_to_drop_from_disk_pool
+							end,
+							ar_events:send(tx, {dropped, DroppedTX, removed_from_tx_queue}),
+							ar_util:encode(DroppedTX#tx.id)
+						end,
+						DroppedTXs
+					),
+					case lists:member(ar_util:encode(TXID), DroppedIDs) of
+						false ->
+							ar_ignore_registry:add(TXID);
+						true ->
+							ok
+					end,
+					?LOG_INFO([
+						{event, drop_txs_from_queue},
+						{dropped_txs, DroppedIDs}
+					])
+			end,
+			NewState = State#state{
+				tx_queue = NewQ,
+				header_size = NewHeaderSize,
+				data_size = NewDataSize,
+				timestamp_map = TimestampMap2
+			},
+			{noreply, NewState}
+	end;
+
+handle_info({event, tx, {dropped, #tx{ id = TXID } = TX, _Reason}}, State) ->
+	#state{
+		tx_queue = Q,
+		header_size = HeaderSize,
+		data_size = DataSize,
+		timestamp_map = TimestampMap
+	} = State,
+	Timestamp = maps:get(TXID, TimestampMap, 0),
+	U = {utility(TX), Timestamp},
+	{TXHeaderSize, TXDataSize} = tx_queue_size(TX),
+	Item = {U, {TX, {TXHeaderSize, TXDataSize}}},
+	case gb_sets:is_element(Item, Q) of
+		true ->
+			ets:update_counter(?MODULE, dropped, 1),
+			{noreply, State#state{
+				tx_queue = gb_sets:del_element(Item, Q),
+				header_size = HeaderSize - TXHeaderSize,
+				data_size = DataSize - TXDataSize,
+				timestamp_map = maps:remove(TXID, TimestampMap)
+			}};
+		false ->
+			{noreply, State}
+	end;
+
+handle_info({event, tx, _Event}, State) ->
+	{noreply, State};
+
+handle_info({'DOWN', Ref,  process, _, normal}, State) ->
+	#state{ emitters_running = EmittersRunning } = State,
+	{noreply, State#state{ emitters_running = maps:remove(Ref, EmittersRunning) }};
+handle_info({'DOWN', Ref,  process, _, Reason}, State) ->
+	#state{ emitters_running = EmittersRunning } = State,
+	?LOG_WARNING([{event, emitter_failed}, {reason, io_lib:format("~p", [Reason])}]),
+	case maps:get(Ref, EmittersRunning, not_found) of
+		not_found ->
+			?LOG_ERROR([{event, invalid_emitter_map},
+				{failure_reason, io_lib:format("~p", [Reason])}]),
+			{noreply, State};
+		TX ->
+			gen_server:cast(?MODULE, {emit_tx_to_peer, TX}),
+			{noreply, State#state{ emitters_running = maps:remove(Ref, EmittersRunning) }}
+	end;
+
+handle_info(Message, State) ->
+	?LOG_WARNING("event: unhandled_info, message: ~p", [Message]),
+	{noreply, State}.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% This function is called by a gen_server when it is about to
+%% terminate. It should be the opposite of Module:init/1 and do any
+%% necessary cleaning up. When it returns, the gen_server terminates
+%% with Reason. The return value is ignored.
+%%
+%% @spec terminate(Reason, State) -> void()
+%% @end
+%%--------------------------------------------------------------------
+terminate(Reason, _State) ->
+	?LOG_INFO([{event, ar_tx_queue_terminated}, {reason, Reason}]),
 	ok.
 
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Convert process state when code is changed
+%%
+%% @spec code_change(OldVsn, State, Extra) -> {ok, NewState}
+%% @end
+%%--------------------------------------------------------------------
 code_change(_OldVsn, State, _Extra) ->
 	{ok, State}.
-
-format_status(_Opt, Status) ->
-	Status.
 
 %%%===================================================================
 %%% Private functions.
 %%%===================================================================
 
-maybe_drop(Q, Size, MaxSize) ->
-	maybe_drop(Q, Size, MaxSize, []).
+maybe_drop(Q, Size, MaxSize, TimestampMap) ->
+	maybe_drop(Q, Size, MaxSize, TimestampMap, []).
 
-maybe_drop(Q, {HeaderSize, DataSize} = Size, {MaxHeaderSize, MaxDataSize} = MaxSize, DroppedTXs) ->
+maybe_drop(Q, {HeaderSize, DataSize} = Size,
+		{MaxHeaderSize, MaxDataSize} = MaxSize, TimestampMap, DroppedTXs) ->
 	case HeaderSize > MaxHeaderSize orelse DataSize > MaxDataSize of
 		true ->
+			ets:update_counter(?MODULE, dropped, 1),
 			{{_, {TX, {DroppedHeaderSize, DroppedDataSize}}}, NewQ} = gb_sets:take_smallest(Q),
 			maybe_drop(
 				NewQ,
 				{HeaderSize - DroppedHeaderSize, DataSize - DroppedDataSize},
 				MaxSize,
+				maps:remove(TX#tx.id, TimestampMap),
 				[TX | DroppedTXs]
 			);
 		false ->
-			{Q, Size, lists:filter(fun(TX) -> TX /= none end, DroppedTXs)}
+			{Q, Size, DroppedTXs, TimestampMap}
 	end.
 
 get_peers() ->
 	Peers =
-		lists:sublist(ar_bridge:get_remote_peers(), ar_meta_db:get(max_propagation_peers)),
+		lists:sublist(ar_bridge:get_remote_peers(10000), ar_meta_db:get(max_propagation_peers)),
 	{ok, Config} = application:get_env(arweave, config),
 	TrustedPeers = Config#config.peers,
 	{join_peers(Peers, TrustedPeers), TrustedPeers}.
@@ -359,11 +472,18 @@ show_queue(Q) ->
 		Q
 	).
 
-utility(TX = #tx { data_size = DataSize }) ->
+utility(TX = #tx{ data_size = DataSize }) ->
 	utility(TX, ?TX_SIZE_BASE + DataSize).
 
-utility(#tx { reward = Reward }, Size) ->
-	erlang:trunc(Reward / Size).
+utility(#tx{ format = 1, reward = Reward, data_size = DataSize }, _Size)
+		when DataSize > ?DEPRIORITIZE_V1_TX_SIZE_THRESHOLD ->
+	{1, Reward};
+utility(#tx{ reward = Reward }, _Size) ->
+	{2, Reward}.
+
+debug_status() ->
+	{ets:lookup(?MODULE, added), ets:lookup(?MODULE, scheduled),
+		ets:lookup(?MODULE, dropped), ets:lookup(?MODULE, emitters_failed)}.
 
 tx_propagated_size(#tx{ format = 2 }) ->
 	?TX_SIZE_BASE;

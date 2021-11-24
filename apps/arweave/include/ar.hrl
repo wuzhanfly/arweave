@@ -13,7 +13,7 @@
 -define(CLIENT_VERSION, 5).
 
 %% The current build number -- incremented for every release.
--define(RELEASE_NUMBER, 46).
+-define(RELEASE_NUMBER, 50).
 
 -define(DEFAULT_REQUEST_HEADERS,
 	[
@@ -47,17 +47,7 @@
 -define(PRIV_KEY_SZ, 4096).
 
 %% The difficulty a new weave is started with.
--ifndef(DEFAULT_DIFF).
--ifdef(FORKS_RESET).
--define(DEFAULT_DIFF, 21).
--else.
 -define(DEFAULT_DIFF, 8).
--endif.
--endif.
-
--ifndef(DEFAULT_SPORA_DIFF).
--define(DEFAULT_SPORA_DIFF, 21).
--endif.
 
 -ifndef(TARGET_TIME).
 -define(TARGET_TIME, 120).
@@ -67,6 +57,19 @@
 -define(RETARGET_BLOCKS, 10).
 -endif.
 
+%% We only do retarget if the time it took to mine ?RETARGET_BLOCKS is bigger than
+%% or equal to ?RETARGET_TOLERANCE_UPPER_BOUND or smaller than or equal to
+%% ?RETARGET_TOLERANCE_LOWER_BOUND.
+-define(RETARGET_TOLERANCE_UPPER_BOUND, ((?TARGET_TIME * ?RETARGET_BLOCKS) + ?TARGET_TIME)).
+
+%% We only do retarget if the time it took to mine ?RETARGET_BLOCKS is bigger than
+%% or equal to ?RETARGET_TOLERANCE_UPPER_BOUND or smaller than or equal to
+%% ?RETARGET_TOLERANCE_LOWER_BOUND.
+-define(RETARGET_TOLERANCE_LOWER_BOUND, ((?TARGET_TIME * ?RETARGET_BLOCKS) - ?TARGET_TIME)).
+
+%% We only do retarget if the time it took to mine ?RETARGET_BLOCKS is more than
+%% 1.1 times bigger or smaller than ?TARGET_TIME * ?RETARGET_BLOCKS. Was used before
+%% the fork 2.5 where we got rid of the floating point calculations.
 -define(RETARGET_TOLERANCE, 0.1).
 
 -define(JOIN_CLOCK_TOLERANCE, 15).
@@ -96,7 +99,7 @@
 -endif.
 
 %% How long to wait before giving up on test(s).
--define(TEST_TIMEOUT, 15 * 60).
+-define(TEST_TIMEOUT, 30 * 60).
 
 %% The maximum byte size of a single POST body.
 -define(MAX_BODY_SIZE, 15 * 1024 * 1024).
@@ -243,13 +246,16 @@
 
 %% The number of the best peers to send new transactions to in parallel.
 %% Can be overriden by a command line argument.
--define(TX_PROPAGATION_PARALLELIZATION, 4).
+-define(TX_PROPAGATION_PARALLELIZATION, 6).
 
 %% The number of the best peers to send new blocks to in parallel.
 -define(BLOCK_PROPAGATION_PARALLELIZATION, 30).
 
-%% The maximum number of peers to propagate blocks or txs to, by default.
--define(DEFAULT_MAX_PROPAGATION_PEERS, 50).
+%% The maximum number of peers to propagate txs to, by default.
+-define(DEFAULT_MAX_PROPAGATION_PEERS, 40).
+
+%% The maximum number of peers to propagate blocks to, by default.
+-define(DEFAULT_MAX_BLOCK_PROPAGATION_PEERS, 50).
 
 %% When the transaction data size is smaller than this number of bytes,
 %% the transaction is gossiped to the peer without a prior check if the peer
@@ -296,10 +302,10 @@
 %% Each emitter picks a transaction from the queue and propagates it
 %% to the best peers, a configured number of peers at a time.
 %% Can be overriden by a command line argument.
--define(NUM_EMITTER_PROCESSES, 2).
+-define(NUM_EMITTER_PROCESSES, 4).
 
 %% Target number of blocks per year.
--define(BLOCK_PER_YEAR, (525600 / (?TARGET_TIME/60)) ).
+-define(BLOCK_PER_YEAR, (525600 / (?TARGET_TIME / 60))).
 
 %% The adjustment of difficutly going from SHA-384 to RandomX.
 -define(RANDOMX_DIFF_ADJUSTMENT, (-14)).
@@ -331,6 +337,29 @@
 -define(CHUNK_ID_HASH_SIZE, 32).
 
 -define(NOTE_SIZE, 32).
+
+%% Disk cache size in MB
+-ifdef(DEBUG).
+-define(DISK_CACHE_SIZE, 1).
+-define(DISK_CACHE_CLEAN_PERCENT_MAX, 20).
+-else.
+-define(DISK_CACHE_SIZE, 5120).
+-define(DISK_CACHE_CLEAN_PERCENT_MAX, 20).
+-endif.
+
+%% The speed in chunks/s of moving the fork 2.5 packing threshold.
+-ifdef(DEBUG).
+-define(PACKING_2_5_THRESHOLD_CHUNKS_PER_SECOND, 1).
+-else.
+-define(PACKING_2_5_THRESHOLD_CHUNKS_PER_SECOND, 10).
+-endif.
+
+%% The data_root of the system "padding" nodes inserted in the transaction Merkle trees
+%% since the 2.5 fork block. User transactions cannot set <<>> for data_root unless
+%% data_size == 0. The motivation is to place all chunks including those
+%% smaller than 256 KiB into the 256 KiB buckets on the weave, to even out their chances to be
+%% picked as recall chunks and therefore equally incentivize the storage.
+-define(PADDING_NODE_DATA_ROOT, <<>>).
 
 %% @doc A succinct proof of access to a recall byte found in a TX.
 -record(poa, {
@@ -384,7 +413,43 @@
 											% this one.
 	size_tagged_txs = unset,				% The list of {{`tx_id`, `data_root`}, `offset`}.
 											% Used internally, not gossiped.
-	poa = #poa{}							% The proof of access.
+	poa = #poa{},							% The proof of access.
+	usd_to_ar_rate,							% The estimated USD to AR conversion rate used
+											% in the pricing calculations.
+											% A tuple {Dividend, Divisor}.
+	scheduled_usd_to_ar_rate,				% The estimated USD to AR conversion rate scheduled
+											% to be used a bit later, used to compute the
+											% necessary fee for the currently signed txs.
+											% A tuple {Dividend, Divisor}.
+	packing_2_5_threshold,					% The offset on the weave separting the data which
+											% has to be packed for mining after the fork 2.5
+											% from the data which does not have to be packed yet.
+											% It is set to the weave_size of the 50th previous
+											% block at the hard fork block and moves down at a
+											% speed of ?PACKING_2_5_THRESHOLD_CHUNKS_PER_SECOND
+											% chunks/s. The motivation behind the threshold is a
+											% smooth transition to the new algorithm - big miners
+											% who might not want to adopt the new algorithm are
+											% still incentivized to upgrade and stay in the
+											% network for some time.
+	strict_data_split_threshold				% The offset on the weave separating the data which
+											% has to be split according to the stricter rules
+											% introduced in the fork 2.5 from the historical
+											% data. The new rules require all chunk sizes to
+											% be 256 KiB excluding the last or the only chunks
+											% of the corresponding transactions and the second
+											% last chunks of their transactions where they
+											% exceed 256 KiB in size when combined with the
+											% following (last) chunk. Furthermore, the new
+											% chunks may not be smaller than their Merkle proofs
+											% unless they are the last chunks.
+											% The motivation is to be able to put all chunks
+											% into 256 KiB buckets. It makes all chunks equally
+											% attractive because they have equal chances of
+											% being chosen as recall chunks. Moreover,
+											% every chunk costs the same in terms of storage
+											% and computation expenditure when packed (smaller
+											% chunks are simply padded before packing).
 }).
 
 %% @doc A transaction.
@@ -405,23 +470,6 @@
 	data_root = <<>>,	% The Merkle root of the Merkle tree of data chunks.
 	signature = <<>>,	% The signature.
 	reward = 0			% The fee in Winstons.
-}).
-
-%% Gossip protocol state.
-%% Passed to and from the gossip library functions of `ar_gossip`.
--record(gs_state, {
-	peers, % A list of the peers known to this node.
-	heard = [], % Hashes of the messages received thus far.
-	loss_probability = 0, % Message loss probability for network simulation.
-	delay = 0, % Message passing delay for network simulation.
-	xfer_speed = undefined % Transfer speed in bytes/s for network simulation.
-}).
-
-%% A message intended to be handled by the internal gossip protocol
-%% library, `ar_gossip`.
--record(gs_msg, {
-	hash,
-	data
 }).
 
 %% Peering performance of a node.

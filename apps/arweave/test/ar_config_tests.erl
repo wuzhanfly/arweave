@@ -27,7 +27,6 @@ parse_config() ->
 		metrics_dir = "metrics_dir",
 		polling = 10,
 		auto_join = false,
-		clean = true,
 		diff = 42,
 		mining_addr = ExpectedMiningAddr,
 		max_miners = 43,
@@ -36,9 +35,10 @@ parse_config() ->
 		stage_two_hashing_threads = 37,
 		max_emitters = 2,
 		max_propagation_peers = 8,
+		max_block_propagation_peers = 60,
 		tx_propagation_parallelization = 4,
 		sync_jobs = 10,
-		new_key = true,
+		header_sync_jobs = 1,
 		load_key = "some_key_file",
 		disk_space = 44 * 1024 * 1024 * 1024,
 		disk_space_check_frequency = 10 * 1000,
@@ -64,7 +64,20 @@ parse_config() ->
 		disk_pool_data_root_expiration_time = 10000,
 		max_disk_pool_buffer_mb = 100000,
 		max_disk_pool_data_root_buffer_mb = 100000000,
-		randomx_bulk_hashing_iterations = 40
+		randomx_bulk_hashing_iterations = 40,
+		disk_cache_size = 1024,
+		semaphores = #{
+			get_chunk := 1,
+			get_and_pack_chunk := 2,
+			get_tx_data := 3,
+			post_chunk := 999,
+			get_block_index := 1,
+			get_wallet_list := 2,
+			arql := 3,
+			gateway_arql := 3,
+			get_sync_record := 10
+		},
+		packing_rate = 20
 	}, ParsedConfig).
 
 config_fixture() ->
